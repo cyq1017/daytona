@@ -10,6 +10,7 @@ replace github.com/samber/lo => github.com/samber/lo v1.39.0
 
 require (
 	github.com/Masterminds/semver/v3 v3.4.0
+	github.com/UserExistsError/conpty v0.1.4
 	github.com/cakturk/go-netstat v0.0.0-20200220111822-e5b49efee7a5
 	github.com/creack/pty v1.1.23
 	github.com/gin-gonic/gin v1.10.1
@@ -28,6 +29,7 @@ require (
 	github.com/ramr/go-reaper v0.3.1
 	github.com/samber/slog-gin v1.20.1
 	github.com/shirou/gopsutil/v4 v4.25.12
+	github.com/sirupsen/logrus v1.9.4
 	github.com/sourcegraph/jsonrpc2 v0.2.0
 	github.com/stretchr/testify v1.11.1
 	github.com/swaggo/files v1.0.1
