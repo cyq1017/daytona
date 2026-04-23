@@ -33,6 +33,8 @@ export function SandboxTableActions({
   onVnc,
   onCreateSshAccess,
   onRevokeSshAccess,
+  onPause,
+  onResume,
   onCreateSnapshot,
   onRecover,
   onScreenRecordings,
@@ -40,7 +42,8 @@ export function SandboxTableActions({
   onViewForks,
   onOpenTerminal,
 }: SandboxTableActionsProps) {
-  const linuxVmEnabled = useFeatureFlagEnabled(FeatureFlags.SANDBOX_LINUX_VM)
+  // const linuxVmEnabled = useFeatureFlagEnabled(FeatureFlags.SANDBOX_LINUX_VM)
+  const linuxVmEnabled = true
   const { getRegionName } = useRegions()
   const isExperimentalRegion = (getRegionName(sandbox.target) ?? '').toLowerCase() === 'experimental'
   const primaryActionTooltip =
@@ -48,17 +51,44 @@ export function SandboxTableActions({
       ? 'Starting sandbox'
       : sandbox.state === SandboxState.STOPPING
         ? 'Stopping sandbox'
-        : sandbox.state === SandboxState.STARTED
-          ? 'Stop sandbox'
-          : sandbox.state === SandboxState.ERROR && sandbox.recoverable
-            ? 'Recover sandbox'
-            : 'Start sandbox'
+        : sandbox.state === SandboxState.PAUSING
+          ? 'Pausing sandbox'
+          : sandbox.state === SandboxState.RESUMING
+            ? 'Resuming sandbox'
+            : sandbox.state === SandboxState.STARTED
+              ? 'Stop sandbox'
+              : sandbox.state === SandboxState.PAUSED
+                ? 'Resume sandbox'
+                : sandbox.state === SandboxState.ERROR && sandbox.recoverable
+                  ? 'Recover sandbox'
+                  : 'Start sandbox'
 
   const menuItems = useMemo(() => {
     const items = []
 
     if (writePermitted) {
       if (sandbox.state === SandboxState.STARTED) {
+        items.push({
+          key: 'stop',
+          label: 'Stop',
+          onClick: () => onStop(sandbox.id),
+          disabled: isLoading,
+        })
+        if (linuxVmEnabled && isExperimentalRegion) {
+          items.push({
+            key: 'pause',
+            label: 'Pause',
+            onClick: () => onPause(sandbox.id),
+            disabled: isLoading,
+          })
+        }
+      } else if (sandbox.state === SandboxState.PAUSED) {
+        items.push({
+          key: 'resume',
+          label: 'Resume',
+          onClick: () => onResume(sandbox.id),
+          disabled: isLoading,
+        })
         items.push({
           key: 'stop',
           label: 'Stop',
@@ -178,6 +208,8 @@ export function SandboxTableActions({
     sandbox.recoverable,
     onStart,
     onStop,
+    onPause,
+    onResume,
     onDelete,
     onArchive,
     onVnc,
@@ -206,7 +238,9 @@ export function SandboxTableActions({
         aria-label={primaryActionTooltip}
         onClick={(e) => {
           e.stopPropagation()
-          if (sandbox.state === SandboxState.STARTED) {
+          if (sandbox.state === SandboxState.PAUSED) {
+            onResume(sandbox.id)
+          } else if (sandbox.state === SandboxState.STARTED) {
             onStop(sandbox.id)
           } else if (sandbox.state === SandboxState.ERROR && sandbox.recoverable) {
             onRecover(sandbox.id)
@@ -218,7 +252,12 @@ export function SandboxTableActions({
       >
         {sandbox.state === SandboxState.STARTED ? (
           <Square className="w-4 h-4" />
-        ) : sandbox.state === SandboxState.STOPPING || sandbox.state === SandboxState.STARTING ? (
+        ) : sandbox.state === SandboxState.PAUSED ? (
+          <Play className="w-4 h-4" />
+        ) : sandbox.state === SandboxState.STOPPING ||
+          sandbox.state === SandboxState.STARTING ||
+          sandbox.state === SandboxState.PAUSING ||
+          sandbox.state === SandboxState.RESUMING ? (
           <Loader2 className="w-4 h-4 animate-spin" />
         ) : sandbox.state === SandboxState.ERROR && sandbox.recoverable ? (
           <Wrench className="w-4 h-4" />

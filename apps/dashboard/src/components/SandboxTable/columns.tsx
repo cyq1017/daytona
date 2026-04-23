@@ -36,6 +36,8 @@ type SandboxTableMeta = {
   handleScreenRecordings: (id: string) => void
   handleCreateSnapshot: (id: string) => void
   handleFork: (id: string) => void
+  handlePause: (id: string) => void
+  handleResume: (id: string) => void
   handleViewForks: (id: string) => void
   handleOpenTerminal: (sandbox: SandboxListItem) => void
 }
@@ -355,6 +357,8 @@ const columns: ColumnDef<SandboxListItem>[] = [
         handleScreenRecordings,
         handleCreateSnapshot,
         handleFork,
+        handlePause,
+        handleResume,
         handleViewForks,
         handleOpenTerminal,
       } = getMeta(table)
@@ -373,6 +377,8 @@ const columns: ColumnDef<SandboxListItem>[] = [
             onVnc={handleVnc}
             onCreateSshAccess={handleCreateSshAccess}
             onRevokeSshAccess={handleRevokeSshAccess}
+            onPause={handlePause}
+            onResume={handleResume}
             onRecover={handleRecover}
             onScreenRecordings={handleScreenRecordings}
             onCreateSnapshot={() => handleCreateSnapshot(row.original.id)}

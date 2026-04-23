@@ -10,11 +10,19 @@ export function isStartable(sandbox: SandboxListItem): boolean {
 }
 
 export function isStoppable(sandbox: SandboxListItem): boolean {
-  return sandbox.state === SandboxState.STARTED
+  return sandbox.state === SandboxState.STARTED || sandbox.state === SandboxState.PAUSED
 }
 
 export function isArchivable(sandbox: SandboxListItem): boolean {
   return sandbox.state === SandboxState.STOPPED
+}
+
+export function isPausable(sandbox: SandboxListItem): boolean {
+  return sandbox.state === SandboxState.STARTED
+}
+
+export function isResumable(sandbox: SandboxListItem): boolean {
+  return sandbox.state === SandboxState.PAUSED
 }
 
 export function isRecoverable(sandbox: SandboxListItem): boolean {
@@ -34,7 +42,9 @@ export function isTransitioning(sandbox: SandboxListItem): boolean {
     sandbox.state === SandboxState.ARCHIVING ||
     sandbox.state === SandboxState.RESTORING ||
     sandbox.state === SandboxState.BUILDING_SNAPSHOT ||
-    sandbox.state === SandboxState.PULLING_SNAPSHOT
+    sandbox.state === SandboxState.PULLING_SNAPSHOT ||
+    sandbox.state === SandboxState.PAUSING ||
+    sandbox.state === SandboxState.RESUMING
   )
 }
 
