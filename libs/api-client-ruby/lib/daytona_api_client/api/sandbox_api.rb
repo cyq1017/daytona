@@ -183,7 +183,7 @@ module DaytonaApiClient
       # HTTP header 'Content-Type'
       content_type = @api_client.select_header_content_type(['application/json'])
       if !content_type.nil?
-          header_params['Content-Type'] = content_type
+        header_params['Content-Type'] = content_type
       end
       header_params[:'X-Daytona-Organization-ID'] = opts[:'x_daytona_organization_id'] if !opts[:'x_daytona_organization_id'].nil?
 
@@ -258,7 +258,7 @@ module DaytonaApiClient
       # HTTP header 'Content-Type'
       content_type = @api_client.select_header_content_type(['application/json'])
       if !content_type.nil?
-          header_params['Content-Type'] = content_type
+        header_params['Content-Type'] = content_type
       end
       header_params[:'X-Daytona-Organization-ID'] = opts[:'x_daytona_organization_id'] if !opts[:'x_daytona_organization_id'].nil?
 
@@ -538,7 +538,7 @@ module DaytonaApiClient
       # HTTP header 'Content-Type'
       content_type = @api_client.select_header_content_type(['application/json'])
       if !content_type.nil?
-          header_params['Content-Type'] = content_type
+        header_params['Content-Type'] = content_type
       end
       header_params[:'X-Daytona-Organization-ID'] = opts[:'x_daytona_organization_id'] if !opts[:'x_daytona_organization_id'].nil?
 
@@ -1709,6 +1709,7 @@ module DaytonaApiClient
     # @option opts [Array<SandboxState>] :states List of states to filter by.
     # @option opts [Array<String>] :snapshots List of snapshot names to filter by
     # @option opts [Array<String>] :region_ids List of regions IDs to filter by
+    # @option opts [Array<SandboxClass>] :sandbox_classes List of sandbox classes to filter by
     # @option opts [Float] :min_cpu Minimum CPU
     # @option opts [Float] :max_cpu Maximum CPU
     # @option opts [Float] :min_memory_gi_b Minimum memory in GiB
@@ -1742,6 +1743,7 @@ module DaytonaApiClient
     # @option opts [Array<SandboxState>] :states List of states to filter by.
     # @option opts [Array<String>] :snapshots List of snapshot names to filter by
     # @option opts [Array<String>] :region_ids List of regions IDs to filter by
+    # @option opts [Array<SandboxClass>] :sandbox_classes List of sandbox classes to filter by
     # @option opts [Float] :min_cpu Minimum CPU
     # @option opts [Float] :max_cpu Maximum CPU
     # @option opts [Float] :min_memory_gi_b Minimum memory in GiB
@@ -1807,6 +1809,7 @@ module DaytonaApiClient
       query_params[:'states'] = @api_client.build_collection_param(opts[:'states'], :multi) if !opts[:'states'].nil?
       query_params[:'snapshots'] = @api_client.build_collection_param(opts[:'snapshots'], :multi) if !opts[:'snapshots'].nil?
       query_params[:'regionIds'] = @api_client.build_collection_param(opts[:'region_ids'], :multi) if !opts[:'region_ids'].nil?
+      query_params[:'sandboxClasses'] = @api_client.build_collection_param(opts[:'sandbox_classes'], :multi) if !opts[:'sandbox_classes'].nil?
       query_params[:'minCpu'] = opts[:'min_cpu'] if !opts[:'min_cpu'].nil?
       query_params[:'maxCpu'] = opts[:'max_cpu'] if !opts[:'max_cpu'].nil?
       query_params[:'minMemoryGiB'] = opts[:'min_memory_gi_b'] if !opts[:'min_memory_gi_b'].nil?
@@ -2129,7 +2132,7 @@ module DaytonaApiClient
       # HTTP header 'Content-Type'
       content_type = @api_client.select_header_content_type(['application/json'])
       if !content_type.nil?
-          header_params['Content-Type'] = content_type
+        header_params['Content-Type'] = content_type
       end
       header_params[:'X-Daytona-Organization-ID'] = opts[:'x_daytona_organization_id'] if !opts[:'x_daytona_organization_id'].nil?
 
@@ -2204,7 +2207,7 @@ module DaytonaApiClient
       # HTTP header 'Content-Type'
       content_type = @api_client.select_header_content_type(['application/json'])
       if !content_type.nil?
-          header_params['Content-Type'] = content_type
+        header_params['Content-Type'] = content_type
       end
       header_params[:'X-Daytona-Organization-ID'] = opts[:'x_daytona_organization_id'] if !opts[:'x_daytona_organization_id'].nil?
 
@@ -2751,7 +2754,7 @@ module DaytonaApiClient
       # HTTP header 'Content-Type'
       content_type = @api_client.select_header_content_type(['application/json'])
       if !content_type.nil?
-          header_params['Content-Type'] = content_type
+        header_params['Content-Type'] = content_type
       end
       header_params[:'X-Daytona-Organization-ID'] = opts[:'x_daytona_organization_id'] if !opts[:'x_daytona_organization_id'].nil?
 
@@ -2894,7 +2897,7 @@ module DaytonaApiClient
       # HTTP header 'Content-Type'
       content_type = @api_client.select_header_content_type(['application/json'])
       if !content_type.nil?
-          header_params['Content-Type'] = content_type
+        header_params['Content-Type'] = content_type
       end
       header_params[:'X-Daytona-Organization-ID'] = opts[:'x_daytona_organization_id'] if !opts[:'x_daytona_organization_id'].nil?
 

@@ -46,6 +46,10 @@ export interface SandboxSearchFilters {
    */
   regionIds?: string[]
   /**
+   * Filter by sandbox classes
+   */
+  sandboxClasses?: SandboxClass[]
+  /**
    * Filter by minimum CPU
    */
   minCpu?: number

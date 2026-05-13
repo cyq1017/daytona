@@ -131,6 +131,20 @@ export class ListSandboxesQueryDto {
   regionIds?: string[]
 
   @ApiProperty({
+    name: 'sandboxClasses',
+    description: 'List of sandbox classes to filter by',
+    required: false,
+    enum: SandboxClass,
+    enumName: 'SandboxClass',
+    isArray: true,
+  })
+  @IsOptional()
+  @ToArray()
+  @IsArray()
+  @IsEnum(SandboxClass, { each: true })
+  sandboxClasses?: SandboxClass[]
+
+  @ApiProperty({
     name: 'minCpu',
     description: 'Minimum CPU',
     required: false,
