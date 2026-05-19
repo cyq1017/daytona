@@ -3,13 +3,20 @@
  * SPDX-License-Identifier: AGPL-3.0
  */
 
-import { Injectable, Logger, OnApplicationBootstrap, OnApplicationShutdown, OnModuleInit } from '@nestjs/common'
+import { Inject, Injectable, Logger, OnApplicationBootstrap, OnApplicationShutdown, OnModuleInit } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
-import { Repository, In } from 'typeorm'
+import { Repository, In, IsNull } from 'typeorm'
 import { Volume } from '../entities/volume.entity'
 import { VolumeState } from '../enums/volume-state.enum'
 import { Cron, CronExpression, SchedulerRegistry } from '@nestjs/schedule'
-import { S3Client, CreateBucketCommand, ListBucketsCommand, PutBucketTaggingCommand } from '@aws-sdk/client-s3'
+import {
+  S3Client,
+  CreateBucketCommand,
+  DeleteObjectsCommand,
+  ListBucketsCommand,
+  ListObjectsV2Command,
+  PutBucketTaggingCommand,
+} from '@aws-sdk/client-s3'
 import { InjectRedis } from '@nestjs-modules/ioredis'
 import { Redis } from 'ioredis'
 import { RedisLockProvider } from '../common/redis-lock.provider'
@@ -21,6 +28,10 @@ import { TrackJobExecution } from '../../common/decorators/track-job-execution.d
 import { setTimeout } from 'timers/promises'
 import { LogExecution } from '../../common/decorators/log-execution.decorator'
 import { WithInstrumentation } from '../../common/decorators/otel.decorator'
+import { LAYERED_VOLUME_PROVIDER, LayeredVolumeProvider, DiskMount } from '../services/layered/layered-volume.provider'
+import { VOLUME_BACKEND_LAYERED, VOLUME_BACKEND_S3FUSE } from '../services/volume.service'
+import { Organization } from '../../organization/entities/organization.entity'
+import { EncryptionService } from '../../encryption/encryption.service'
 
 const VOLUME_STATE_LOCK_KEY = 'volume-state-'
 
@@ -38,10 +49,14 @@ export class VolumeManager
   constructor(
     @InjectRepository(Volume)
     private readonly volumeRepository: Repository<Volume>,
+    @InjectRepository(Organization)
+    private readonly organizationRepository: Repository<Organization>,
     private readonly configService: TypedConfigService,
     @InjectRedis() private readonly redis: Redis,
     private readonly redisLockProvider: RedisLockProvider,
     private readonly schedulerRegistry: SchedulerRegistry,
+    @Inject(LAYERED_VOLUME_PROVIDER) private readonly layeredClient: LayeredVolumeProvider,
+    private readonly encryptionService: EncryptionService,
   ) {
     if (!this.configService.get('s3.endpoint')) {
       return
@@ -64,6 +79,17 @@ export class VolumeManager
     })
   }
 
+  // Whether any volume backend is wired up. We start the cron processor as
+  // long as at least one is configured; per-volume branching then routes to
+  // the matching backend (and rejects volumes whose backend isn't set up).
+  //
+  // Note: the layered backend always provisions an S3 bucket *and* a
+  // layered disk that mounts it, so it requires *both* services. Without S3
+  // we still want the cron to run for s3fuse-only volumes, hence the OR.
+  private get anyBackendConfigured(): boolean {
+    return Boolean(this.s3Client) || this.layeredClient.isConfigured()
+  }
+
   async onModuleInit() {
     if (!this.s3Client) {
       return
@@ -78,11 +104,12 @@ export class VolumeManager
   }
 
   onApplicationBootstrap() {
-    if (!this.s3Client) {
+    if (!this.anyBackendConfigured) {
       return
     }
 
     this.schedulerRegistry.getCronJob('process-pending-volumes').start()
+    this.schedulerRegistry.getCronJob('meter-volume-storage').start()
   }
 
   async onApplicationShutdown() {
@@ -110,7 +137,7 @@ export class VolumeManager
   @LogExecution('process-pending-volumes')
   @WithInstrumentation()
   async processPendingVolumes() {
-    if (!this.s3Client) {
+    if (!this.anyBackendConfigured) {
       return
     }
 
@@ -188,47 +215,13 @@ export class VolumeManager
         state: VolumeState.CREATING,
       })
 
-      // Refresh lock before S3 operation
-      await this.redis.setex(lockKey, 30, '1')
-
-      // Create bucket in Minio/S3
-      const createBucketCommand = new CreateBucketCommand({
-        Bucket: volume.getBucketName(),
-      })
-
-      await this.s3Client.send(createBucketCommand)
-
-      await this.s3Client.send(
-        new PutBucketTaggingCommand({
-          Bucket: volume.getBucketName(),
-          Tagging: {
-            TagSet: [
-              {
-                Key: 'VolumeId',
-                Value: volume.id,
-              },
-              {
-                Key: 'OrganizationId',
-                Value: volume.organizationId,
-              },
-              {
-                Key: 'Environment',
-                Value: this.configService.get('environment'),
-              },
-            ],
-          },
-        }),
-      )
-
-      // Refresh lock before final state update
-      await this.redis.setex(lockKey, 30, '1')
-
-      // Update volume state to READY
-      await this.volumeRepository.save({
-        ...volume,
-        state: VolumeState.READY,
-      })
-      this.logger.debug(`Volume ${volume.id} created successfully`)
+      const backend = volume.backend || VOLUME_BACKEND_S3FUSE
+      if (backend === VOLUME_BACKEND_LAYERED) {
+        await this.provisionLayeredDisk(volume, lockKey)
+      } else {
+        await this.provisionS3Bucket(volume, lockKey)
+      }
+      this.logger.debug(`Volume ${volume.id} created successfully (backend=${backend})`)
     } catch (error) {
       this.logger.error(`Error creating volume ${volume.id}:`, error)
       await this.volumeRepository.save({
@@ -236,6 +229,243 @@ export class VolumeManager
         state: VolumeState.ERROR,
         errorReason: error.message,
       })
+    }
+  }
+
+  private async provisionS3Bucket(volume: Volume, lockKey: string): Promise<void> {
+    if (!this.s3Client) {
+      throw new Error(
+        `Volume ${volume.id} uses backend 's3fuse' but S3 is not configured on this API. Configure S3 or change the volume's backend.`,
+      )
+    }
+
+    await this.createAndTagPerVolumeS3Bucket(volume, lockKey)
+
+    // Refresh lock before final state update
+    await this.redis.setex(lockKey, 30, '1')
+
+    await this.volumeRepository.save({
+      ...volume,
+      state: VolumeState.READY,
+    })
+  }
+
+  // Creates the per-volume s3fuse bucket for `volume` and tags it.
+  // Idempotent enough for our retry path: if the bucket already exists and
+  // we own it, AWS returns BucketAlreadyOwnedByYou which we treat as
+  // success.
+  private async createAndTagPerVolumeS3Bucket(volume: Volume, lockKey: string): Promise<void> {
+    // Refresh lock before S3 operation
+    await this.redis.setex(lockKey, 30, '1')
+
+    try {
+      await this.s3Client.send(new CreateBucketCommand({ Bucket: volume.getBucketName() }))
+    } catch (error) {
+      if (error?.name !== 'BucketAlreadyOwnedByYou') {
+        throw error
+      }
+    }
+
+    await this.s3Client.send(
+      new PutBucketTaggingCommand({
+        Bucket: volume.getBucketName(),
+        Tagging: {
+          TagSet: [
+            { Key: 'VolumeId', Value: volume.id },
+            { Key: 'OrganizationId', Value: volume.organizationId },
+            { Key: 'Environment', Value: this.configService.get('environment') },
+          ],
+        },
+      }),
+    )
+  }
+
+  // Idempotent provisioning of the per-organization layered bucket. The
+  // first layered volume in an organization lazily creates the bucket and
+  // persists the chosen name on `organization.layeredBucketName`; later
+  // volumes reuse it.
+  //
+  // When the org has a custom bucket configured (BYOB), we skip creation
+  // and just return the user-supplied bucket name.
+  private async ensureOrgLayeredBucket(volume: Volume): Promise<{ bucketName: string; org: Organization }> {
+    if (!volume.organizationId) {
+      throw new Error(`Volume ${volume.id} has no organizationId; cannot provision a per-organization layered bucket.`)
+    }
+
+    const org = await this.organizationRepository.findOne({ where: { id: volume.organizationId } })
+    if (!org) {
+      throw new Error(`Organization ${volume.organizationId} not found while provisioning layered volume ${volume.id}`)
+    }
+
+    if (org.customBucketConfig) {
+      return { bucketName: org.customBucketConfig.bucketName, org }
+    }
+
+    if (!this.s3Client) {
+      throw new Error(
+        `Volume ${volume.id} requires layered storage but S3 is not configured on this API. The layered backend stores volume data in a Daytona-owned S3 bucket and requires S3 to be configured.`,
+      )
+    }
+
+    const bucketName = org.layeredBucketName || `daytona-volume-layered-${org.id}`
+
+    try {
+      await this.s3Client.send(new CreateBucketCommand({ Bucket: bucketName }))
+    } catch (error) {
+      if (error?.name !== 'BucketAlreadyOwnedByYou') {
+        throw error
+      }
+    }
+
+    await this.s3Client.send(
+      new PutBucketTaggingCommand({
+        Bucket: bucketName,
+        Tagging: {
+          TagSet: [
+            { Key: 'OrganizationId', Value: org.id },
+            { Key: 'Purpose', Value: 'layered-volumes' },
+            { Key: 'Environment', Value: this.configService.get('environment') },
+          ],
+        },
+      }),
+    )
+
+    if (org.layeredBucketName !== bucketName) {
+      org.layeredBucketName = bucketName
+      await this.organizationRepository.save(org)
+    }
+
+    return { bucketName, org }
+  }
+
+  // Builds the layered mount configuration that backs a volume's disk with
+  // the per-organization S3 bucket + the volume's prefix folder inside it.
+  //
+  // When the org has a custom bucket (BYOB), uses the org's own credentials.
+  // Otherwise falls back to the platform-wide S3 config.
+  private async buildLayeredMount(bucketName: string, volume: Volume, org: Organization): Promise<DiskMount> {
+    let accessKeyId: string
+    let secretAccessKey: string
+    let endpoint: string | undefined
+
+    if (org.customBucketConfig) {
+      accessKeyId = await this.encryptionService.decrypt(org.customBucketConfig.accessKeyIdEnc)
+      secretAccessKey = await this.encryptionService.decrypt(org.customBucketConfig.secretAccessKeyEnc)
+      endpoint = org.customBucketConfig.endpoint
+    } else {
+      endpoint = this.configService.getOrThrow('s3.endpoint') as string
+      accessKeyId = this.configService.getOrThrow('s3.accessKey') as string
+      secretAccessKey = this.configService.getOrThrow('s3.secretKey') as string
+    }
+
+    if (endpoint) {
+      const endpointWithProtocol = endpoint.startsWith('http') ? endpoint : `https://${endpoint}`
+
+      let isAws = false
+      try {
+        isAws = /(^|\.)amazonaws\.com$/i.test(new URL(endpointWithProtocol).hostname)
+      } catch {
+        // Malformed endpoint — fall through to s3-compatible
+      }
+
+      if (isAws) {
+        return {
+          type: 's3',
+          bucketName,
+          bucketPrefix: volume.getLayeredBucketPrefix(),
+          accessKeyId,
+          secretAccessKey,
+        }
+      }
+      return {
+        type: 's3-compatible',
+        bucketName,
+        bucketEndpoint: endpointWithProtocol,
+        bucketPrefix: volume.getLayeredBucketPrefix(),
+        accessKeyId,
+        secretAccessKey,
+      }
+    }
+
+    // No endpoint means native AWS S3 (BYOB user omitted endpoint)
+    return {
+      type: 's3',
+      bucketName,
+      bucketPrefix: volume.getLayeredBucketPrefix(),
+      accessKeyId,
+      secretAccessKey,
+    }
+  }
+
+  private async provisionLayeredDisk(volume: Volume, lockKey: string): Promise<void> {
+    await this.assertLayeredProvisioningPossible(volume)
+
+    // Step 1: provision (or reuse) the per-org bucket that backs every
+    // layered volume in this organization.
+    await this.redis.setex(lockKey, 30, '1')
+    const { bucketName, org } = await this.ensureOrgLayeredBucket(volume)
+
+    // Step 2: ask the control plane to create a disk that mounts the
+    // bucket scoped to this volume's prefix. The disk has its own
+    // generated token at creation; we throw it away — per-sandbox tokens
+    // are minted lazily on the `sandbox_volume` table. The org bucket is
+    // intentionally not rolled back on failure: it's a shared resource
+    // and the next volume create will reuse it.
+    await this.redis.setex(lockKey, 30, '1')
+    let updated: Volume
+    try {
+      updated = await this.ensureLayeredDiskFor(volume, bucketName, org)
+    } catch (error) {
+      this.logger.error(`Layered createDisk failed for volume ${volume.id}`, error)
+      throw error
+    }
+
+    // Refresh lock before final state update
+    await this.redis.setex(lockKey, 30, '1')
+    await this.volumeRepository.save({ ...updated, state: VolumeState.READY })
+  }
+
+  // Idempotent provisioning of a layered disk for the given volume. If the
+  // volume row already has a `layeredDiskId` we assume the disk exists and
+  // return as-is — useful for retries after a partial provision.
+  //
+  // Caveat: the control plane's createDisk is idempotent on
+  // (name, configuration), but its initial token is one-time. We
+  // intentionally discard that initial token; per-sandbox tokens are
+  // minted on first attach via `LayeredVolumeClient.mintMountKey`.
+  private async ensureLayeredDiskFor(volume: Volume, bucketName: string, org: Organization): Promise<Volume> {
+    if (volume.layeredDiskId) {
+      return volume
+    }
+
+    const created = await this.layeredClient.createDisk({
+      name: volume.getLayeredDiskName(),
+      region: this.layeredClient.getDefaultRegion(),
+      mount: await this.buildLayeredMount(bucketName, volume, org),
+    })
+
+    return await this.volumeRepository.save({
+      ...volume,
+      layeredDiskId: created.diskId,
+      layeredRegion: created.region,
+    })
+  }
+
+  private async assertLayeredProvisioningPossible(volume: Volume): Promise<void> {
+    if (!this.layeredClient.isConfigured()) {
+      throw new Error(
+        `Volume ${volume.id} requires the layered backend but its control plane is not configured on this API. Set LAYERED_API_KEY.`,
+      )
+    }
+
+    // S3 is only required when the org doesn't have a custom bucket (BYOB).
+    if (!this.s3Client) {
+      const org = await this.organizationRepository.findOne({ where: { id: volume.organizationId } })
+      if (!org?.customBucketConfig) {
+        throw new Error(
+          `Volume ${volume.id} requires the layered backend but S3 is not configured on this API. Either configure S3 or set a custom bucket on the organization.`,
+        )
+      }
     }
   }
 
@@ -250,20 +480,12 @@ export class VolumeManager
         state: VolumeState.DELETING,
       })
 
-      // Refresh lock before S3 operation
-      await this.redis.setex(lockKey, 30, '1')
-
-      // Delete bucket from Minio/S3
-      try {
-        await deleteS3Bucket(this.s3Client, volume.getBucketName())
-      } catch (error) {
-        if (error.name === 'NoSuchBucket') {
-          this.logger.warn(`Bucket for volume ${volume.id} does not exist, treating as already deleted`)
-        } else if (error.name === 'BucketNotEmpty') {
-          throw new Error('Volume deletion failed because the bucket is not empty. You may retry deletion.')
-        } else {
-          throw error
-        }
+      const backend = volume.backend || VOLUME_BACKEND_S3FUSE
+      if (backend === VOLUME_BACKEND_LAYERED) {
+        await this.deleteLayeredDisk(volume, lockKey)
+        await this.deleteLayeredBucketPrefix(volume, lockKey)
+      } else {
+        await this.deletePerVolumeBucket(volume, lockKey)
       }
 
       // Refresh lock before final state update
@@ -276,13 +498,14 @@ export class VolumeManager
         state: VolumeState.DELETED,
       })
 
-      // Update volume state to DELETED and rename
       await this.volumeRepository.save({
         ...volume,
         state: VolumeState.DELETED,
         name: `${volume.name}-deleted`,
+        layeredDiskId: null,
+        layeredRegion: null,
       })
-      this.logger.debug(`Volume ${volume.id} deleted successfully`)
+      this.logger.debug(`Volume ${volume.id} deleted successfully (backend=${backend})`)
     } catch (error) {
       this.logger.error(`Error deleting volume ${volume.id}:`, error)
       await this.volumeRepository.save({
@@ -290,6 +513,217 @@ export class VolumeManager
         state: VolumeState.ERROR,
         errorReason: error.message,
       })
+    }
+  }
+
+  // Delete the volume's layered disk. Always called *before*
+  // deleteLayeredBucketPrefix so the disk stops syncing into S3 —
+  // otherwise an in-flight write could recreate objects right after we
+  // emptied the prefix. Idempotent on missing disks (the control plane
+  // returns 404 which is treated as success in `LayeredVolumeClient`).
+  private async deleteLayeredDisk(volume: Volume, lockKey: string): Promise<void> {
+    if (!volume.layeredDiskId) {
+      return
+    }
+    if (!this.layeredClient.isConfigured()) {
+      throw new Error(
+        `Volume ${volume.id} has a layered disk but the control plane is not configured on this API. Set LAYERED_API_KEY to retry deletion.`,
+      )
+    }
+
+    await this.redis.setex(lockKey, 30, '1')
+    await this.layeredClient.deleteDisk(
+      volume.layeredDiskId,
+      volume.layeredRegion || this.layeredClient.getDefaultRegion(),
+    )
+  }
+
+  // Empties out the volume's prefix from the org's layered bucket. We do
+  // NOT delete the bucket itself — it's shared across every layered volume
+  // in the organization.
+  private async deleteLayeredBucketPrefix(volume: Volume, lockKey: string): Promise<void> {
+    if (!volume.organizationId) {
+      return
+    }
+
+    const org = await this.organizationRepository.findOne({ where: { id: volume.organizationId } })
+
+    // Determine which bucket + S3 client to use for cleanup.
+    let bucketName: string | undefined
+    let client: S3Client | null = null
+
+    if (org?.customBucketConfig) {
+      bucketName = org.customBucketConfig.bucketName
+      const accessKeyId = await this.encryptionService.decrypt(org.customBucketConfig.accessKeyIdEnc)
+      const secretAccessKey = await this.encryptionService.decrypt(org.customBucketConfig.secretAccessKeyEnc)
+      const endpoint = org.customBucketConfig.endpoint
+      client = new S3Client({
+        ...(endpoint && { endpoint: endpoint.startsWith('http') ? endpoint : `https://${endpoint}` }),
+        ...(org.customBucketConfig.region && { region: org.customBucketConfig.region }),
+        credentials: { accessKeyId, secretAccessKey },
+        forcePathStyle: true,
+      })
+    } else {
+      bucketName = org?.layeredBucketName ?? undefined
+      client = this.s3Client
+    }
+
+    if (!bucketName) {
+      return
+    }
+    if (!client) {
+      throw new Error(
+        `Volume ${volume.id} has layered data but S3 is not configured on this API. Configure S3 to retry deletion.`,
+      )
+    }
+
+    await this.redis.setex(lockKey, 30, '1')
+    const prefix = volume.getLayeredBucketPrefix()
+    let continuationToken: string | undefined
+    do {
+      const list = await client.send(
+        new ListObjectsV2Command({
+          Bucket: bucketName,
+          Prefix: prefix,
+          ContinuationToken: continuationToken,
+        }),
+      )
+      if (list.Contents && list.Contents.length > 0) {
+        await client.send(
+          new DeleteObjectsCommand({
+            Bucket: bucketName,
+            Delete: {
+              Objects: list.Contents.map((o) => ({ Key: o.Key })),
+              Quiet: true,
+            },
+          }),
+        )
+      }
+      continuationToken = list.NextContinuationToken
+    } while (continuationToken)
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Volume storage metering
+  // ──────────────────────────────────────────────────────────────────────
+
+  @Cron(CronExpression.EVERY_MINUTE, { name: 'meter-volume-storage', waitForCompletion: true, disabled: true })
+  @TrackJobExecution()
+  @LogExecution('meter-volume-storage')
+  @WithInstrumentation()
+  async meterVolumeStorage() {
+    if (!this.anyBackendConfigured) {
+      return
+    }
+
+    const lockKey = 'meter-volume-storage'
+    if (!(await this.redisLockProvider.lock(lockKey, 55))) {
+      return
+    }
+
+    try {
+      // Pick up to 100 READY volumes, preferring those never checked or
+      // checked longest ago so every volume gets measured eventually.
+      const volumes = await this.volumeRepository
+        .createQueryBuilder('volume')
+        .where('volume.state = :state', { state: VolumeState.READY })
+        .orderBy('volume.storageCheckedAt', 'ASC', 'NULLS FIRST')
+        .take(100)
+        .getMany()
+
+      for (const volume of volumes) {
+        try {
+          const sizeMb = await this.measureVolumeSizeMb(volume)
+          if (sizeMb !== null) {
+            await this.volumeRepository.update(volume.id, {
+              currentStorageMb: sizeMb,
+              storageCheckedAt: new Date(),
+            })
+          }
+        } catch (error) {
+          this.logger.warn(`Failed to measure storage for volume ${volume.id}: ${error?.message ?? error}`)
+        }
+      }
+    } finally {
+      await this.redisLockProvider.unlock(lockKey)
+    }
+  }
+
+  private async measureVolumeSizeMb(volume: Volume): Promise<number | null> {
+    const backend = volume.backend || VOLUME_BACKEND_S3FUSE
+    let client: S3Client | null = null
+    let bucketName: string | undefined
+    let prefix: string | undefined
+
+    if (backend === VOLUME_BACKEND_LAYERED) {
+      const org = await this.organizationRepository.findOne({ where: { id: volume.organizationId } })
+      if (org?.customBucketConfig) {
+        const accessKeyId = await this.encryptionService.decrypt(org.customBucketConfig.accessKeyIdEnc)
+        const secretAccessKey = await this.encryptionService.decrypt(org.customBucketConfig.secretAccessKeyEnc)
+        const endpoint = org.customBucketConfig.endpoint
+        client = new S3Client({
+          ...(endpoint && { endpoint: endpoint.startsWith('http') ? endpoint : `https://${endpoint}` }),
+          ...(org.customBucketConfig.region && { region: org.customBucketConfig.region }),
+          credentials: { accessKeyId, secretAccessKey },
+          forcePathStyle: true,
+        })
+        bucketName = org.customBucketConfig.bucketName
+      } else {
+        client = this.s3Client
+        bucketName = org?.layeredBucketName ?? undefined
+      }
+      prefix = volume.getLayeredBucketPrefix()
+    } else {
+      client = this.s3Client
+      bucketName = volume.getBucketName()
+      prefix = undefined
+    }
+
+    if (!client || !bucketName) {
+      return null
+    }
+
+    let totalBytes = 0
+    let continuationToken: string | undefined
+    do {
+      const list = await client.send(
+        new ListObjectsV2Command({
+          Bucket: bucketName,
+          Prefix: prefix,
+          ContinuationToken: continuationToken,
+        }),
+      )
+      if (list.Contents) {
+        for (const obj of list.Contents) {
+          totalBytes += obj.Size ?? 0
+        }
+      }
+      continuationToken = list.NextContinuationToken
+    } while (continuationToken)
+
+    return totalBytes / (1024 * 1024)
+  }
+
+  // Delete the volume's backing S3 bucket for legacy s3fuse volumes.
+  // Tolerates NoSuchBucket so retries after a partial delete are safe.
+  private async deletePerVolumeBucket(volume: Volume, lockKey: string): Promise<void> {
+    if (!this.s3Client) {
+      throw new Error(
+        `Volume ${volume.id} has a backing S3 bucket but S3 is not configured on this API. Configure S3 to retry deletion.`,
+      )
+    }
+
+    await this.redis.setex(lockKey, 30, '1')
+    try {
+      await deleteS3Bucket(this.s3Client, volume.getBucketName())
+    } catch (error) {
+      if (error?.name === 'NoSuchBucket') {
+        this.logger.warn(`Bucket for volume ${volume.id} does not exist, treating as already deleted`)
+      } else if (error?.name === 'BucketNotEmpty') {
+        throw new Error('Volume deletion failed because the bucket is not empty. You may retry deletion.')
+      } else {
+        throw error
+      }
     }
   }
 }

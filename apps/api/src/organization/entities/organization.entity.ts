@@ -9,6 +9,14 @@ import { OrganizationRole } from './organization-role.entity'
 import { OrganizationInvitation } from './organization-invitation.entity'
 import { RegionQuota } from './region-quota.entity'
 
+export interface CustomBucketConfig {
+  bucketName: string
+  endpoint?: string
+  region?: string
+  accessKeyIdEnc: string
+  secretAccessKeyEnc: string
+}
+
 @Entity()
 export class Organization {
   @PrimaryGeneratedColumn('uuid')
@@ -192,11 +200,37 @@ export class Organization {
   updatedAt: Date
 
   @Column({
+    default: 's3fuse',
+  })
+  defaultVolumeBackend: string
+
+  // Name of the per-organization S3 bucket that backs every layered volume
+  // for this org. Lazily created on first layered volume create and
+  // persisted here so subsequent volumes can reuse it (and so we can later
+  // switch the deterministic naming scheme without a hot migration). Null
+  // until the org provisions its first layered volume.
+  @Column({
+    nullable: true,
+    name: 'layeredBucketName',
+  })
+  layeredBucketName?: string | null
+
+  // User-supplied (BYOB) bucket configuration for the layered backend.
+  // When set, the volume manager uses these credentials instead of the
+  // platform-wide S3 config. All secret fields are stored encrypted.
+  // Schema: { bucketName, endpoint?, accessKeyIdEnc, secretAccessKeyEnc, region? }
+  @Column({
+    type: 'jsonb',
+    nullable: true,
+    name: 'customBucketConfig',
+  })
+  customBucketConfig?: CustomBucketConfig | null
+
+  @Column({
     type: 'jsonb',
     nullable: true,
     name: 'experimentalConfig',
   })
-  // configuration for experimental features
   _experimentalConfig: Record<string, any> | null
 
   @Column({
@@ -211,6 +245,10 @@ export class Organization {
       organizationId: this.id,
       organizationName: this.name,
       limitNetworkEgress: String(this.sandboxLimitedNetworkEgress),
+      // volumeBackend is intentionally NOT defaulted here. It is stamped
+      // per-sandbox from the resolved volume backend in
+      // `applyVolumeBackendMetadata`, so a sandbox with no volumes never
+      // carries a backend hint that could route it to the wrong mounter.
     }
   }
 

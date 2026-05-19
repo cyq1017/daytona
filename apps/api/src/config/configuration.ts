@@ -89,6 +89,19 @@ const configuration = {
     accountId: process.env.S3_ACCOUNT_ID,
     roleName: process.env.S3_ROLE_NAME,
   },
+  layered: {
+    // API key used to authenticate against the layered-volume control plane.
+    // Format: "key-{API_KEY}" (the prefix is added by the client). Required
+    // for the layered in-container volume backend.
+    apiKey: process.env.LAYERED_API_KEY,
+    // Default region for newly created layered disks
+    // (e.g. "aws-us-east-1", "aws-eu-west-1", "aws-us-west-2", "gcp-us-central1").
+    // Each region has its own control-plane URL; see LayeredVolumeClient.
+    defaultRegion: process.env.LAYERED_DEFAULT_REGION || 'aws-us-east-1',
+    // Optional override of the per-region control-plane base URL. Format:
+    // LAYERED_CONTROL_URL_<REGION>=<https://...>
+    // If unset for a region, the client falls back to the documented default.
+  },
   notificationGatewayDisabled: process.env.NOTIFICATION_GATEWAY_DISABLED === 'true',
   skipConnections: process.env.SKIP_CONNECTIONS === 'true',
   maxAutoArchiveInterval: parseInt(process.env.MAX_AUTO_ARCHIVE_INTERVAL || '43200', 10),

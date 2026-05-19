@@ -21,6 +21,21 @@ import { TypedConfigService } from '../../config/typed-config.service'
 import { RedisLockProvider } from '../common/redis-lock.provider'
 import { SandboxRepository } from '../repositories/sandbox.repository'
 import { SandboxDesiredState } from '../enums/sandbox-desired-state.enum'
+import { SandboxVolume } from '../dto/sandbox.dto'
+import { DtoVolumeDTO } from '@daytona/runner-api-client'
+import { SandboxVolumeMountService } from './sandbox-volume-mount.service'
+
+export const VOLUME_BACKEND_S3FUSE = 's3fuse'
+export const VOLUME_BACKEND_LAYERED = 'layered'
+
+export interface PreparedRunnerVolumes {
+  volumes: DtoVolumeDTO[]
+  // The single backend that all of the sandbox's volumes share. Sandbox start
+  // sets `metadata.volumeBackend` to this so the runner picks the matching
+  // mounter (host-side s3fuse vs in-container layered). Undefined when the
+  // sandbox has no volumes at all.
+  backend?: string
+}
 
 @Injectable()
 export class VolumeService {
@@ -34,6 +49,7 @@ export class VolumeService {
     private readonly organizationUsageService: OrganizationUsageService,
     private readonly configService: TypedConfigService,
     private readonly redisLockProvider: RedisLockProvider,
+    private readonly sandboxVolumeMountService: SandboxVolumeMountService,
   ) {}
 
   private async validateOrganizationQuotas(
@@ -74,8 +90,31 @@ export class VolumeService {
   }
 
   async create(organization: Organization, createVolumeDto: CreateVolumeDto): Promise<Volume> {
-    if (!this.configService.get('s3.endpoint')) {
+    // The backend is locked at create time so the rest of the volume's
+    // lifecycle (provision, mount, delete) has a single source of truth.
+    const backend = organization.defaultVolumeBackend || VOLUME_BACKEND_S3FUSE
+
+    // Each backend has its own configuration prerequisite. Fail fast with a
+    // clear message rather than letting the async manager get stuck in
+    // PENDING_CREATE forever.
+    if (backend === VOLUME_BACKEND_S3FUSE && !this.configService.get('s3.endpoint')) {
       throw new ServiceUnavailableException('Object storage is not configured')
+    }
+    if (backend === VOLUME_BACKEND_LAYERED) {
+      // The layered backend stores data in a per-organization S3 bucket
+      // and exposes each volume through a control-plane disk that mounts
+      // a `<volumeId>/` prefix of that bucket. Both services have to be
+      // configured.
+      if (!this.configService.get('s3.endpoint')) {
+        throw new ServiceUnavailableException(
+          'Layered volume backend requires S3 to be configured (the layered disk is backed by a Daytona-owned S3 bucket). Configure S3 or change the organization default to s3fuse.',
+        )
+      }
+      if (!this.configService.get('layered.apiKey')) {
+        throw new ServiceUnavailableException(
+          'Layered volume backend is not configured. Set LAYERED_API_KEY or change the organization default to s3fuse.',
+        )
+      }
     }
 
     let pendingVolumeCountIncrement: number | undefined
@@ -114,9 +153,10 @@ export class VolumeService {
 
       volume.organizationId = organization.id
       volume.state = VolumeState.PENDING_CREATE
+      volume.backend = backend
 
       const savedVolume = await this.volumeRepository.save(volume)
-      this.logger.debug(`Created volume ${savedVolume.id} for organization ${organization.id}`)
+      this.logger.debug(`Created volume ${savedVolume.id} for organization ${organization.id} (backend=${backend})`)
       return savedVolume
     } catch (error) {
       await this.rollbackPendingUsage(organization.id, pendingVolumeCountIncrement)
@@ -141,25 +181,45 @@ export class VolumeService {
       )
     }
 
-    // Check if any non-destroyed sandboxes are using this volume
-    const sandboxUsingVolume = await this.sandboxRepository
-      .createQueryBuilder('sandbox')
-      .where('sandbox.organizationId = :organizationId', {
-        organizationId: volume.organizationId,
-      })
-      .andWhere('sandbox.volumes @> :volFilter::jsonb', {
-        volFilter: JSON.stringify([{ volumeId }]),
-      })
-      .andWhere('sandbox.desiredState != :destroyed', {
-        destroyed: SandboxDesiredState.DESTROYED,
-      })
-      .select(['sandbox.id', 'sandbox.name'])
-      .getOne()
+    // Refuse if any non-destroyed sandbox is using this volume. For layered
+    // volumes we check `sandbox_volume`; for s3fuse the reference lives in
+    // the sandbox JSONB column.
+    if (volume.backend === VOLUME_BACKEND_LAYERED) {
+      const activeMounts = await this.sandboxVolumeMountService.findAllForVolume(volumeId)
+      if (activeMounts.length) {
+        const activeIds = activeMounts.map((m) => m.sandboxId)
+        const stillRunning = await this.sandboxRepository
+          .createQueryBuilder('sandbox')
+          .where('sandbox.id IN (:...ids)', { ids: activeIds })
+          .andWhere('sandbox.desiredState != :destroyed', { destroyed: SandboxDesiredState.DESTROYED })
+          .select(['sandbox.id', 'sandbox.name'])
+          .getOne()
+        if (stillRunning) {
+          throw new ConflictException(
+            `Volume cannot be deleted because it is in use by one or more sandboxes (e.g. ${stillRunning.name})`,
+          )
+        }
+      }
+    } else {
+      const sandboxUsingVolume = await this.sandboxRepository
+        .createQueryBuilder('sandbox')
+        .where('sandbox.organizationId = :organizationId', {
+          organizationId: volume.organizationId,
+        })
+        .andWhere('sandbox.volumes @> :volFilter::jsonb', {
+          volFilter: JSON.stringify([{ volumeId }]),
+        })
+        .andWhere('sandbox.desiredState != :destroyed', {
+          destroyed: SandboxDesiredState.DESTROYED,
+        })
+        .select(['sandbox.id', 'sandbox.name'])
+        .getOne()
 
-    if (sandboxUsingVolume) {
-      throw new ConflictException(
-        `Volume cannot be deleted because it is in use by one or more sandboxes (e.g. ${sandboxUsingVolume.name})`,
-      )
+      if (sandboxUsingVolume) {
+        throw new ConflictException(
+          `Volume cannot be deleted because it is in use by one or more sandboxes (e.g. ${sandboxUsingVolume.name})`,
+        )
+      }
     }
 
     // Update state to mark as deleting
@@ -239,6 +299,79 @@ export class VolumeService {
         throw new BadRequestError(`Volume '${volume.name}' is not in a ready state. Current state: ${volume.state}`)
       }
     }
+  }
+
+  // Resolves the per-sandbox volume DTOs that the runner expects, branching
+  // on storage layout:
+  //
+  //  - sandboxes with rows in `sandbox_volume` (layered backend) — token is
+  //    minted on demand by `SandboxVolumeMountService.prepareForStart`.
+  //  - sandboxes with entries in `sandbox.volumes` JSONB (legacy s3fuse) —
+  //    DTOs are built straight from the JSONB references.
+  //
+  // The two paths are mutually exclusive by construction: layered volumes
+  // are never written to the JSONB column, and s3fuse volumes are never
+  // written to `sandbox_volume`. Sandboxes pre-dating the layered backend
+  // therefore continue to work bit-for-bit on the legacy path.
+  async prepareRunnerVolumes(sandboxId: string, sandboxVolumesJsonb?: SandboxVolume[]): Promise<PreparedRunnerVolumes> {
+    const layered = await this.sandboxVolumeMountService.prepareForStart(sandboxId)
+    if (layered.length > 0) {
+      if (sandboxVolumesJsonb?.length) {
+        // Should be impossible (we never persist both), but treat as a
+        // hard error so we surface the inconsistency instead of silently
+        // dropping mounts.
+        throw new BadRequestError(
+          `Sandbox ${sandboxId} has both legacy s3fuse volume references and layered sandbox_volume rows. ` +
+            `Refusing to start; one of the two must be cleaned up.`,
+        )
+      }
+      const dtos: DtoVolumeDTO[] = layered.map(({ mount, volume, mountToken }) => ({
+        volumeId: mount.volumeId,
+        mountPath: mount.mountPath,
+        subpath: mount.subpath ?? undefined,
+        readOnly: mount.readOnly,
+        layeredDisk: volume.layeredDiskId,
+        layeredRegion: volume.layeredRegion,
+        layeredMountToken: mountToken,
+      }))
+      return { volumes: dtos, backend: VOLUME_BACKEND_LAYERED }
+    }
+
+    if (!sandboxVolumesJsonb?.length) {
+      return { volumes: [], backend: undefined }
+    }
+
+    const volumeIds = sandboxVolumesJsonb.map((v) => v.volumeId)
+    const persisted = await this.volumeRepository.find({ where: { id: In(volumeIds) } })
+    const persistedById = new Map(persisted.map((v) => [v.id, v]))
+
+    const dtos: DtoVolumeDTO[] = []
+    for (const ref of sandboxVolumesJsonb) {
+      const volume = persistedById.get(ref.volumeId)
+      if (!volume) {
+        throw new NotFoundException(`Volume ${ref.volumeId} not found`)
+      }
+      if ((volume.backend || VOLUME_BACKEND_S3FUSE) !== VOLUME_BACKEND_S3FUSE) {
+        // Defense-in-depth: the create path forbids putting layered
+        // volumes on the JSONB column, but if somehow one ended up here
+        // the runner would silently try to s3fuse-mount it. Fail loudly.
+        throw new BadRequestError(
+          `Volume ${volume.id} uses backend '${volume.backend}' but is referenced via the legacy s3fuse JSONB column.`,
+        )
+      }
+      dtos.push({
+        volumeId: ref.volumeId,
+        mountPath: ref.mountPath,
+        subpath: ref.subpath,
+        // Per-mount read-only flag honored by both backends. The s3fuse
+        // path enforces it via Docker bind mode (`:ro` on the bind spec)
+        // so the host-side mount-s3 can stay shared and writable; only
+        // the in-container view is read-only.
+        readOnly: ref.readOnly,
+      })
+    }
+
+    return { volumes: dtos, backend: VOLUME_BACKEND_S3FUSE }
   }
 
   async getOrganizationId(params: { id: string } | { name: string; organizationId: string }): Promise<string> {

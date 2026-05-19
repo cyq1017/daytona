@@ -757,6 +757,89 @@ paths:
       summary: Update sandbox default limited network egress
       tags:
       - organizations
+  /organizations/{organizationId}/default-volume-backend:
+    put:
+      operationId: setDefaultVolumeBackend
+      parameters:
+      - description: Organization ID
+        explode: false
+        in: path
+        name: organizationId
+        required: true
+        schema:
+          type: string
+        style: simple
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateOrganizationDefaultVolumeBackend"
+        required: true
+      responses:
+        "204":
+          description: Default volume backend updated successfully
+      security:
+      - bearer: []
+      - oauth2:
+        - openid
+        - profile
+        - email
+      summary: Set default volume backend
+      tags:
+      - organizations
+  /organizations/{organizationId}/custom-bucket:
+    delete:
+      operationId: deleteCustomBucketConfig
+      parameters:
+      - description: Organization ID
+        explode: false
+        in: path
+        name: organizationId
+        required: true
+        schema:
+          type: string
+        style: simple
+      responses:
+        "204":
+          description: Custom bucket configuration removed successfully
+      security:
+      - bearer: []
+      - oauth2:
+        - openid
+        - profile
+        - email
+      summary: Remove custom bucket configuration (revert to platform-managed bucket)
+      tags:
+      - organizations
+    put:
+      operationId: setCustomBucketConfig
+      parameters:
+      - description: Organization ID
+        explode: false
+        in: path
+        name: organizationId
+        required: true
+        schema:
+          type: string
+        style: simple
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateOrganizationCustomBucket"
+        required: true
+      responses:
+        "204":
+          description: Custom bucket configuration updated successfully
+      security:
+      - bearer: []
+      - oauth2:
+        - openid
+        - profile
+        - email
+      summary: Set custom bucket configuration for layered volumes
+      tags:
+      - organizations
   /organizations/{organizationId}/experimental-config:
     put:
       operationId: updateExperimentalConfig
@@ -9456,6 +9539,7 @@ components:
         defaultRegionId: defaultRegionId
         sandboxCreateRateLimitTtlSeconds: 2.027123023002322
         suspensionReason: suspensionReason
+        defaultVolumeBackend: s3fuse
         sandboxLifecycleRateLimit: 9.301444243932576
         suspendedAt: 2000-01-23T04:56:07.000+00:00
         personal: true
@@ -9524,6 +9608,13 @@ components:
         defaultRegionId:
           description: Default region ID
           type: string
+        defaultVolumeBackend:
+          description: Default volume backend for sandbox volumes
+          enum:
+          - s3fuse
+          - layered
+          example: s3fuse
+          type: string
         authenticatedRateLimit:
           description: Authenticated rate limit per minute
           nullable: true
@@ -9561,6 +9652,7 @@ components:
       - authenticatedRateLimitTtlSeconds
       - createdAt
       - createdBy
+      - defaultVolumeBackend
       - experimentalConfig
       - id
       - maxCpuPerSandbox
@@ -9882,6 +9974,55 @@ components:
           type: boolean
       required:
       - sandboxDefaultLimitedNetworkEgress
+      type: object
+    UpdateOrganizationDefaultVolumeBackend:
+      example:
+        defaultVolumeBackend: s3fuse
+      properties:
+        defaultVolumeBackend:
+          description: The default volume backend for the organization. `s3fuse` mounts
+            on the runner host (existing behavior). `layered` mounts inside the sandbox
+            via the layered control plane using a per-sandbox-volume mount token.
+          enum:
+          - s3fuse
+          - layered
+          example: s3fuse
+          type: string
+      required:
+      - defaultVolumeBackend
+      type: object
+    UpdateOrganizationCustomBucket:
+      example:
+        accessKeyId: accessKeyId
+        secretAccessKey: secretAccessKey
+        bucketName: my-org-volumes
+        endpoint: https://s3.us-east-1.amazonaws.com
+        region: us-east-1
+      properties:
+        bucketName:
+          description: S3 bucket name to use for layered volumes
+          example: my-org-volumes
+          type: string
+        endpoint:
+          description: "S3-compatible endpoint URL. Required for non-AWS providers\
+            \ (MinIO, R2, GCS, etc.). Omit for native AWS S3."
+          example: https://s3.us-east-1.amazonaws.com
+          type: string
+        region:
+          description: AWS region of the bucket (e.g. "us-east-1"). Used when endpoint
+            is omitted (native AWS).
+          example: us-east-1
+          type: string
+        accessKeyId:
+          description: Access key ID with read/write permissions on the bucket
+          type: string
+        secretAccessKey:
+          description: Secret access key
+          type: string
+      required:
+      - accessKeyId
+      - bucketName
+      - secretAccessKey
       type: object
     CreateOrganizationRole:
       example:
@@ -10680,6 +10821,7 @@ components:
         mountPath: /data
         volumeId: volume123
         subpath: users/alice
+        readOnly: false
       properties:
         volumeId:
           description: The ID of the volume
@@ -10695,6 +10837,14 @@ components:
             \ is mounted."
           example: users/alice
           type: string
+        readOnly:
+          default: false
+          description: "Mount the volume read-only inside this sandbox. The volume\
+            \ itself is unchanged; this is a per-mount attribute, so the same volume\
+            \ can be mounted read-write in one sandbox and read-only in another. Defaults\
+            \ to false."
+          example: false
+          type: boolean
       required:
       - mountPath
       - volumeId
@@ -10759,9 +10909,11 @@ components:
         - mountPath: /data
           volumeId: volume123
           subpath: users/alice
+          readOnly: false
         - mountPath: /data
           volumeId: volume123
           subpath: users/alice
+          readOnly: false
         cpu: 2
         recoverable: true
         env:
@@ -10977,9 +11129,11 @@ components:
           - mountPath: /data
             volumeId: volume123
             subpath: users/alice
+            readOnly: false
           - mountPath: /data
             volumeId: volume123
             subpath: users/alice
+            readOnly: false
           cpu: 2
           recoverable: true
           env:
@@ -11018,9 +11172,11 @@ components:
           - mountPath: /data
             volumeId: volume123
             subpath: users/alice
+            readOnly: false
           - mountPath: /data
             volumeId: volume123
             subpath: users/alice
+            readOnly: false
           cpu: 2
           recoverable: true
           env:
@@ -11085,9 +11241,11 @@ components:
         - mountPath: /data
           volumeId: volume123
           subpath: users/alice
+          readOnly: false
         - mountPath: /data
           volumeId: volume123
           subpath: users/alice
+          readOnly: false
         cpu: 2
         env:
           NODE_ENV: production
@@ -13805,6 +13963,7 @@ components:
         lastUsedAt: 2023-01-01T00:00:00.000Z
         errorReason: Error processing volume
         name: my-volume
+        backend: s3fuse
         id: vol-12345678
         state: ready
         updatedAt: 2023-01-01T00:00:00.000Z
@@ -13844,7 +14003,16 @@ components:
           example: Error processing volume
           nullable: true
           type: string
+        backend:
+          description: Backend that physically stores the volume. Set when the volume
+            is created from the organization default and immutable afterwards.
+          enum:
+          - s3fuse
+          - layered
+          example: s3fuse
+          type: string
       required:
+      - backend
       - createdAt
       - errorReason
       - id

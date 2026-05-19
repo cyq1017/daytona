@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -28,6 +29,9 @@ import (
 	"github.com/daytonaio/runner/pkg/services"
 	"github.com/daytonaio/runner/pkg/sshgateway"
 	"github.com/daytonaio/runner/pkg/telemetry/filters"
+	"github.com/daytonaio/runner/pkg/volume"
+	"github.com/daytonaio/runner/pkg/volume/incontainer"
+	"github.com/daytonaio/runner/pkg/volume/s3fuse"
 	"github.com/docker/docker/client"
 	"github.com/lmittmann/tint"
 	"github.com/mattn/go-isatty"
@@ -141,14 +145,32 @@ func run() int {
 
 	backupInfoCache := cache.NewBackupInfoCache(ctx, cfg.BackupInfoCacheRetention)
 
+	defaultVolumeMounter := volume.Mounter(s3fuse.NewMounter(s3fuse.Config{
+		AWSRegion:          cfg.AWSRegion,
+		AWSEndpointUrl:     cfg.AWSEndpointUrl,
+		AWSAccessKeyId:     cfg.AWSAccessKeyId,
+		AWSSecretAccessKey: cfg.AWSSecretAccessKey,
+	}, logger))
+
+	// Layered in-container mounter: registered only when the operator has
+	// installed the layered mount CLI binary on the host and pointed
+	// LAYERED_BINARY_PATH at it. When unset, the "layered" backend is
+	// disabled and organizations that select it silently fall back to
+	// "s3fuse" (host-side). Per-(sandbox, volume) mount tokens are supplied
+	// by the control plane on each volume; the runner does not need a
+	// layered API key.
+	inContainerVolumeMounter, err := maybeBuildInContainerMounter(ctx, cfg, logger)
+	if err != nil {
+		logger.Error("Failed to initialize layered in-container volume backend", "error", err)
+		return 2
+	}
+
 	dockerClient, err := docker.NewDockerClient(ctx, docker.DockerClientConfig{
 		ApiClient:                    cli,
 		BackupInfoCache:              backupInfoCache,
 		Logger:                       logger,
-		AWSRegion:                    cfg.AWSRegion,
-		AWSEndpointUrl:               cfg.AWSEndpointUrl,
-		AWSAccessKeyId:               cfg.AWSAccessKeyId,
-		AWSSecretAccessKey:           cfg.AWSSecretAccessKey,
+		DefaultVolumeMounter:         defaultVolumeMounter,
+		InContainerVolumeMounter:     inContainerVolumeMounter,
 		DaemonPath:                   daemonPath,
 		ComputerUsePluginPath:        pluginPath,
 		NetRulesManager:              netRulesManager,
@@ -320,4 +342,30 @@ func run() int {
 		logger.Error("Docker monitor error", "error", err)
 		return 1
 	}
+}
+
+// maybeBuildInContainerMounter constructs the layered in-container volume
+// mounter when the operator has provided LAYERED_BINARY_PATH, or returns
+// (nil, nil) to indicate the backend stays disabled. When disabled,
+// resolveVolumeMounter silently falls "layered" sandboxes back to s3fuse.
+//
+// A non-nil error is returned only when LAYERED_BINARY_PATH is set but
+// invalid, so the runner fails fast on operator misconfiguration.
+func maybeBuildInContainerMounter(_ context.Context, cfg *config.Config, logger *slog.Logger) (volume.Mounter, error) {
+	if cfg.LayeredBinaryPath == "" {
+		return nil, nil
+	}
+	if _, err := os.Stat(cfg.LayeredBinaryPath); err != nil {
+		return nil, fmt.Errorf("LAYERED_BINARY_PATH not accessible: %w", err)
+	}
+
+	mounter := incontainer.NewMounter(incontainer.Config{
+		LayeredBinaryHostPath: cfg.LayeredBinaryPath,
+	})
+
+	logger.Info(
+		"Layered in-container volume backend enabled",
+		"layeredBinary", cfg.LayeredBinaryPath,
+	)
+	return mounter, nil
 }
