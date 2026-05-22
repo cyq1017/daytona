@@ -16,20 +16,19 @@ import (
 	"github.com/daytonaio/daemon/pkg/ssh/config"
 	"github.com/gliderlabs/ssh"
 	"github.com/pkg/sftp"
-
-	log "github.com/sirupsen/logrus"
 )
 
 type Server struct {
-	WorkDir        string
-	DefaultWorkDir string
+	logger         *slog.Logger
+	workDir        string
+	defaultWorkDir string
 }
 
 func NewServer(logger *slog.Logger, workDir, defaultWorkDir string) *Server {
-	_ = logger
 	return &Server{
-		WorkDir:        workDir,
-		DefaultWorkDir: defaultWorkDir,
+		logger:         logger.With(slog.String("component", "ssh_server")),
+		workDir:        workDir,
+		defaultWorkDir: defaultWorkDir,
 	}
 }
 
@@ -39,23 +38,21 @@ func (s *Server) Start() error {
 	sshServer := ssh.Server{
 		Addr: fmt.Sprintf(":%d", config.SSH_PORT),
 		PublicKeyHandler: func(ctx ssh.Context, key ssh.PublicKey) bool {
-			// Allow all public key authentication attempts
-			log.Debugf("Public key authentication accepted for user: %s", ctx.User())
+			s.logger.Debug("Public key authentication accepted", "user", ctx.User())
 			return true
 		},
 		PasswordHandler: func(ctx ssh.Context, password string) bool {
-			log.Debugf("Password authentication attempt for user: %s", ctx.User())
+			s.logger.Debug("Password authentication attempt", "user", ctx.User())
 			if len(password) > 0 {
-				log.Debugf("Received password length: %d, starts with: %s", len(password), password[:min(len(password), 3)])
+				s.logger.Debug("Received password", "length", len(password))
 			} else {
-				log.Debugf("Received empty password")
+				s.logger.Debug("Received empty password")
 			}
-			// Only allow authentication with the hardcoded password 'sandbox-ssh'
 			authenticated := password == "sandbox-ssh"
 			if authenticated {
-				log.Debugf("Password authentication succeeded for user: %s", ctx.User())
+				s.logger.Debug("Password authentication succeeded", "user", ctx.User())
 			} else {
-				log.Debugf("Password authentication failed for user: %s (wrong password)", ctx.User())
+				s.logger.Debug("Password authentication failed (wrong password)", "user", ctx.User())
 			}
 			return authenticated
 		},
@@ -66,7 +63,7 @@ func (s *Server) Start() error {
 				s.sftpHandler(session)
 				return
 			default:
-				log.Errorf("Subsystem %s not supported\n", ss)
+				s.logger.Error("Subsystem not supported", "subsystem", ss)
 				session.Exit(1)
 				return
 			}
@@ -100,29 +97,35 @@ func (s *Server) Start() error {
 		},
 	}
 
-	log.Printf("Starting SSH server on port %d...\n", config.SSH_PORT)
+	s.logger.Info("Starting SSH server", "port", config.SSH_PORT)
 	return sshServer.ListenAndServe()
 }
 
 func (s *Server) handlePty(session ssh.Session, ptyReq ssh.Pty, winCh <-chan ssh.Window) {
-	dir := s.WorkDir
+	dir := s.workDir
 
-	if _, err := os.Stat(s.WorkDir); os.IsNotExist(err) {
-		dir = s.DefaultWorkDir
+	if _, err := os.Stat(s.workDir); os.IsNotExist(err) {
+		dir = s.defaultWorkDir
 	}
 
-	// Use ConPTY for Windows PTY support
-	err := SpawnConPTY(SpawnConPTYOptions{
-		Dir:    dir,
-		StdIn:  session,
-		StdOut: session,
-		Cols:   uint16(ptyReq.Window.Width),
-		Rows:   uint16(ptyReq.Window.Height),
-		WinCh:  winCh,
-	})
+	sizeCh := make(chan common.TTYSize)
+	go func() {
+		defer close(sizeCh)
+		for win := range winCh {
+			sizeCh <- common.TTYSize{Width: win.Width, Height: win.Height}
+		}
+	}()
 
+	err := common.SpawnTTY(common.SpawnTTYOptions{
+		Dir:      dir,
+		StdIn:    session,
+		StdOut:   session,
+		InitCols: ptyReq.Window.Width,
+		InitRows: ptyReq.Window.Height,
+		SizeCh:   sizeCh,
+	})
 	if err != nil {
-		log.Debugf("Failed to spawn ConPTY: %v", err)
+		s.logger.Debug("Failed to spawn PTY", "error", err)
 		return
 	}
 }
@@ -133,27 +136,24 @@ func (s *Server) handleNonPty(session ssh.Session) {
 
 	var args []string
 	if len(session.Command()) > 0 {
-		// Parse the command for Windows compatibility
 		rawCmd := session.RawCommand()
 
-		// Check if this is a Linux-style shell wrapper (from SDKs)
 		parsedCommand, envVars := common.ParseShellWrapper(rawCmd)
 		if parsedCommand != rawCmd {
-			log.Debugf("Parsed shell wrapper: %q -> %q (env: %v)", rawCmd, parsedCommand, envVars)
+			s.logger.Debug("Parsed shell wrapper", "raw", rawCmd, "parsed", parsedCommand, "env", envVars)
 		}
 
-		// Build Windows command with env vars if any
-		finalCommand := common.BuildWindowsCommand(parsedCommand, envVars)
+		finalCommand := common.BuildWindowsCommandForShell(parsedCommand, envVars, common.IsPowerShell(shell))
 
 		args = append(shellArgs, finalCommand)
 	}
 
 	cmd := exec.Command(shell, args...)
 	cmd.Env = append(cmd.Env, os.Environ()...)
-	cmd.Dir = s.WorkDir
+	cmd.Dir = s.workDir
 
-	if _, err := os.Stat(s.WorkDir); os.IsNotExist(err) {
-		cmd.Dir = s.DefaultWorkDir
+	if _, err := os.Stat(s.workDir); os.IsNotExist(err) {
+		cmd.Dir = s.defaultWorkDir
 	}
 
 	cmd.Stdout = session
@@ -161,22 +161,20 @@ func (s *Server) handleNonPty(session ssh.Session) {
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
-		log.Errorf("Unable to setup stdin for session: %v", err)
+		s.logger.Error("Unable to setup stdin for session", "error", err)
 		return
 	}
 
 	go func() {
-		_, err := io.Copy(stdinPipe, session)
-		if err != nil {
-			log.Errorf("Unable to read from session: %v", err)
+		if _, err := io.Copy(stdinPipe, session); err != nil {
+			s.logger.Error("Unable to read from session", "error", err)
 			return
 		}
 		_ = stdinPipe.Close()
 	}()
 
-	err = cmd.Start()
-	if err != nil {
-		log.Errorf("Unable to start command: %v", err)
+	if err := cmd.Start(); err != nil {
+		s.logger.Error("Unable to start command", "error", err)
 		return
 	}
 
@@ -193,39 +191,31 @@ func (s *Server) handleNonPty(session ssh.Session) {
 		}
 	}()
 
-	err = cmd.Wait()
-
-	if err != nil {
-		log.Println(session.RawCommand(), " ", err)
+	if err := cmd.Wait(); err != nil {
+		s.logger.Info("Command exited with error", "command", session.RawCommand(), "error", err)
 		session.Exit(127)
 		return
 	}
 
-	err = session.Exit(0)
-	if err != nil {
-		log.Warnf("Unable to exit session: %v", err)
+	if err := session.Exit(0); err != nil {
+		s.logger.Warn("Unable to exit session", "error", err)
 	}
 }
 
-// handleSignal handles SSH signals on Windows
 func (s *Server) handleSignal(cmd *exec.Cmd, sig ssh.Signal) {
 	if cmd.Process == nil {
 		return
 	}
 
-	// On Windows, we can only reliably kill processes
 	switch sig {
 	case ssh.SIGKILL, ssh.SIGTERM, ssh.SIGINT, ssh.SIGQUIT:
-		err := cmd.Process.Kill()
-		if err != nil {
-			log.Warnf("Unable to kill process: %v", err)
+		if err := cmd.Process.Kill(); err != nil {
+			s.logger.Warn("Unable to kill process", "error", err)
 		}
 	default:
-		// For other signals, attempt to kill as Windows doesn't support Unix signals
-		log.Debugf("Signal %s received, killing process on Windows", sig)
-		err := cmd.Process.Kill()
-		if err != nil {
-			log.Warnf("Unable to kill process for signal %s: %v", sig, err)
+		s.logger.Debug("Signal received, killing process on Windows", "signal", sig)
+		if err := cmd.Process.Kill(); err != nil {
+			s.logger.Warn("Unable to kill process for signal", "signal", sig, "error", err)
 		}
 	}
 }
@@ -240,12 +230,12 @@ func (s *Server) sftpHandler(session ssh.Session) {
 		serverOptions...,
 	)
 	if err != nil {
-		log.Errorf("sftp server init error: %s\n", err)
+		s.logger.Error("sftp server init error", "error", err)
 		return
 	}
 	if err := server.Serve(); err == io.EOF {
 		server.Close()
 	} else if err != nil {
-		log.Errorf("sftp server completed with error: %s\n", err)
+		s.logger.Error("sftp server completed with error", "error", err)
 	}
 }

@@ -6,67 +6,60 @@
 package common
 
 import (
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
-
-	log "github.com/sirupsen/logrus"
 )
 
 // GetShell returns the path to the preferred shell on Windows.
 // By default uses cmd.exe for faster execution. Set DAYTONA_SHELL env var
 // to override (e.g., "powershell.exe" or "pwsh.exe").
 func GetShell() string {
-	// Allow override via environment variable
 	if shell := os.Getenv("DAYTONA_SHELL"); shell != "" {
 		if path, err := exec.LookPath(shell); err == nil {
-			log.Debugf("GetShell: using DAYTONA_SHELL override: %s", path)
+			slog.Debug("GetShell: using DAYTONA_SHELL override", "path", path)
 			return path
 		}
-		log.Warnf("GetShell: DAYTONA_SHELL=%s not found, falling back", shell)
+		slog.Warn("GetShell: DAYTONA_SHELL not found, falling back", "shell", shell)
 	}
 
 	// Try direct path to cmd.exe first (most reliable, ~100ms vs ~2s for PowerShell)
 	cmdExePath := `C:\Windows\System32\cmd.exe`
 	if _, err := os.Stat(cmdExePath); err == nil {
-		log.Debugf("GetShell: using cmd.exe at %s", cmdExePath)
+		slog.Debug("GetShell: using cmd.exe", "path", cmdExePath)
 		return cmdExePath
 	} else {
-		log.Warnf("GetShell: cmd.exe not found at %s: %v", cmdExePath, err)
+		slog.Warn("GetShell: cmd.exe not found at default path", "path", cmdExePath, "error", err)
 	}
 
-	// Fallback to LookPath for cmd.exe
 	if cmd, err := exec.LookPath("cmd.exe"); err == nil {
-		log.Debugf("GetShell: using cmd.exe from PATH: %s", cmd)
+		slog.Debug("GetShell: using cmd.exe from PATH", "path", cmd)
 		return cmd
 	}
 
-	// Fallback to PowerShell if cmd.exe not available
 	if powershell, err := exec.LookPath("powershell.exe"); err == nil {
-		log.Warnf("GetShell: falling back to PowerShell: %s (this will be slow!)", powershell)
+		slog.Warn("GetShell: falling back to PowerShell (this will be slow!)", "path", powershell)
 		return powershell
 	}
 
-	// Check for PowerShell Core
 	if pwsh, err := exec.LookPath("pwsh.exe"); err == nil {
-		log.Warnf("GetShell: falling back to pwsh: %s (this will be slow!)", pwsh)
+		slog.Warn("GetShell: falling back to pwsh (this will be slow!)", "path", pwsh)
 		return pwsh
 	}
 
-	// Last resort: check common paths
 	commonPaths := []string{
 		`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
 	}
 
 	for _, p := range commonPaths {
 		if _, err := os.Stat(p); err == nil {
-			log.Warnf("GetShell: using fallback path: %s (this will be slow!)", p)
+			slog.Warn("GetShell: using fallback path (this will be slow!)", "path", p)
 			return p
 		}
 	}
 
-	// Return powershell.exe and let the caller handle errors
-	log.Errorf("GetShell: no shell found, defaulting to powershell.exe")
+	slog.Error("GetShell: no shell found, defaulting to powershell.exe")
 	return "powershell.exe"
 }
 

@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/daytonaio/daemon/pkg/common"
-	log "github.com/sirupsen/logrus"
 
 	"github.com/gin-gonic/gin"
 )
@@ -32,7 +31,6 @@ import (
 //
 //	@id				ExecuteCommand
 func ExecuteCommand(logger *slog.Logger) gin.HandlerFunc {
-	_ = logger
 	return func(c *gin.Context) {
 		startTime := time.Now()
 
@@ -49,16 +47,21 @@ func ExecuteCommand(logger *slog.Logger) gin.HandlerFunc {
 
 		parsedCommand, envVars := common.ParseShellWrapper(request.Command)
 		if parsedCommand != request.Command {
-			log.Debugf("Parsed shell wrapper: %q -> %q (env: %v)", request.Command, parsedCommand, envVars)
+			logger.Debug("Parsed shell wrapper", "raw", request.Command, "parsed", parsedCommand, "env", envVars)
 		}
 
 		shell := common.GetShell()
 		shellArgs := common.GetShellArgs(shell)
 
-		finalCommand := common.BuildWindowsCommandForShell(parsedCommand, envVars, common.IsPowerShell(shell))
+		isPowerShell := common.IsPowerShell(shell)
+		finalCommand := common.BuildWindowsCommandForShell(parsedCommand, envVars, isPowerShell)
 
-		log.Debugf("ExecuteCommand: shell=%s, isPowerShell=%v, command=%q, setup took %v",
-			shell, common.IsPowerShell(shell), finalCommand, time.Since(startTime))
+		logger.Debug("ExecuteCommand: prepared",
+			"shell", shell,
+			"is_powershell", isPowerShell,
+			"command", finalCommand,
+			"setup_duration", time.Since(startTime),
+		)
 
 		execStartTime := time.Now()
 
@@ -78,9 +81,8 @@ func ExecuteCommand(logger *slog.Logger) gin.HandlerFunc {
 		timer := time.AfterFunc(timeout, func() {
 			timeoutReached = true
 			if cmd.Process != nil {
-				err := cmd.Process.Kill()
-				if err != nil {
-					log.Error(err)
+				if err := cmd.Process.Kill(); err != nil {
+					logger.Error("Failed to kill process on timeout", "error", err)
 					return
 				}
 			}
@@ -89,7 +91,10 @@ func ExecuteCommand(logger *slog.Logger) gin.HandlerFunc {
 
 		output, err := cmd.CombinedOutput()
 		execDuration := time.Since(execStartTime)
-		log.Debugf("ExecuteCommand: execution took %v, total time %v", execDuration, time.Since(startTime))
+		logger.Debug("ExecuteCommand: completed",
+			"execution_duration", execDuration,
+			"total_duration", time.Since(startTime),
+		)
 
 		if err != nil {
 			if timeoutReached {

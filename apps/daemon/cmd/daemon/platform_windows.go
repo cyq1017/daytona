@@ -23,8 +23,9 @@ func handlePlatformSubcommands(_ []string, _ string, _ *slog.Logger) (int, bool)
 	return 0, false
 }
 
-func setupEntrypoint(args []string, _ *session.SessionService, _ *slog.Logger) func() {
+func setupEntrypoint(args []string, _ *session.SessionService, logger *slog.Logger) func() {
 	if len(args) > 0 {
+		logger.Warn("Entrypoint args are not supported on Windows; ignoring", "args", args)
 		return func() {}
 	}
 

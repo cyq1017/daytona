@@ -63,6 +63,9 @@ func setupEntrypoint(args []string, sessionService *session.SessionService, logg
 	)
 	if err != nil {
 		logger.Error("Failed to execute entrypoint command", "error", err)
+		if delErr := sessionService.Delete(context.Background(), util.EntrypointSessionID); delErr != nil {
+			logger.Error("Failed to delete entrypoint session after execute failure", "error", delErr)
+		}
 		return nil
 	}
 

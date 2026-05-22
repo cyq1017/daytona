@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
 	"runtime"
 
 	"github.com/daytonaio/daemon/pkg/common"
@@ -104,7 +105,11 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	dir := "/"
 	if runtime.GOOS == "windows" {
-		dir = "C:\\"
+		if sysDrive := os.Getenv("SystemDrive"); sysDrive != "" {
+			dir = sysDrive + `\`
+		} else {
+			dir = `C:\`
+		}
 	}
 
 	err = common.SpawnTTY(common.SpawnTTYOptions{

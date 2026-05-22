@@ -29,7 +29,6 @@ require (
 	github.com/ramr/go-reaper v0.3.1
 	github.com/samber/slog-gin v1.20.1
 	github.com/shirou/gopsutil/v4 v4.25.12
-	github.com/sirupsen/logrus v1.9.4
 	github.com/sourcegraph/jsonrpc2 v0.2.0
 	github.com/stretchr/testify v1.11.1
 	github.com/swaggo/files v1.0.1

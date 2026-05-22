@@ -10,41 +10,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/google/uuid"
 )
-
-func validateLabel(label string) error {
-	const maxLabelLength = 100
-
-	trimmed := strings.TrimSpace(label)
-	if trimmed == "" {
-		return ErrInvalidLabel
-	}
-
-	if len(label) > maxLabelLength {
-		return ErrInvalidLabel
-	}
-
-	if strings.Contains(label, "/") || strings.Contains(label, "\\") {
-		return ErrInvalidLabel
-	}
-
-	if strings.HasPrefix(trimmed, ".") {
-		return ErrInvalidLabel
-	}
-
-	safePattern := regexp.MustCompile(`^[A-Za-z0-9.\s_-]+$`)
-	if !safePattern.MatchString(label) {
-		return ErrInvalidLabel
-	}
-
-	return nil
-}
 
 func (s *RecordingService) StartRecording(label *string) (*Recording, error) {
 	if err := os.MkdirAll(s.recordingsDir, 0755); err != nil {
