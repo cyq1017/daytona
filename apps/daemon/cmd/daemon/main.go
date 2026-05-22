@@ -4,7 +4,6 @@
 package main
 
 import (
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"

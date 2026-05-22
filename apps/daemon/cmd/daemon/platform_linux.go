@@ -56,9 +56,10 @@ func setupEntrypoint(args []string, sessionService *session.SessionService, logg
 		util.EntrypointSessionID,
 		util.EntrypointCommandID,
 		command,
-		true,
-		false,
-		true,
+		true,  // async=true for non-blocking
+		false, // isCombinedOutput=false
+		false, // skipServerDemux=false (internal, async so demux irrelevant)
+		true,  // suppressInputEcho=true
 	)
 	if err != nil {
 		logger.Error("Failed to execute entrypoint command", "error", err)
