@@ -83,11 +83,9 @@ func DownloadFiles(c *gin.Context) {
 		if err := writeFilePart(c.Request.Context(), mw, path, f, info.Size()); err != nil {
 			f.Close()
 
-			// Mid-part failure: log, close the multipart with what we have, and flush
-			// so the client gets a well-formed (short) response, not a mid-part EOF.
+			// Mid-part failure: end the response now so the client's truncation
+			// guard surfaces this loudly instead of as a successful short file.
 			_ = c.Error(err)
-			_ = mw.Close()
-			flushResponse(c)
 			return
 		}
 		f.Close()
