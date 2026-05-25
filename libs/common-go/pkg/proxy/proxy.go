@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -49,8 +48,7 @@ func NewProxyRequestHandler(getProxyTarget func(*gin.Context) (targetUrl *url.UR
 			return
 		}
 
-		var reverseProxy *httputil.ReverseProxy
-		reverseProxy = &httputil.ReverseProxy{
+		reverseProxy := &httputil.ReverseProxy{
 			Director: func(req *http.Request) {
 				req.Host = target.Host
 				req.URL.Scheme = target.Scheme
@@ -66,17 +64,8 @@ func NewProxyRequestHandler(getProxyTarget func(*gin.Context) (targetUrl *url.UR
 					req.Header.Add(key, value)
 				}
 			},
-			Transport: proxyTransport,
-			ModifyResponse: func(res *http.Response) error {
-				if strings.HasPrefix(strings.ToLower(res.Header.Get("Content-Type")), "multipart/") {
-					// Flush multipart writes so closing boundaries are not buffered.
-					reverseProxy.FlushInterval = -1
-				}
-				if modifyResponse != nil {
-					return modifyResponse(res)
-				}
-				return nil
-			},
+			Transport:      proxyTransport,
+			ModifyResponse: modifyResponse,
 		}
 
 		reverseProxy.ServeHTTP(ctx.Writer, ctx.Request)
