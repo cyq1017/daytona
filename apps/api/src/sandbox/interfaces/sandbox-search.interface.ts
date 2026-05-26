@@ -4,6 +4,7 @@
  */
 
 import { SandboxState } from '../enums/sandbox-state.enum'
+import { SandboxClass } from '../enums/sandbox-class.enum'
 import { SandboxListItemDto } from '../dto/sandbox-list-item.dto'
 import {
   SandboxListSortField as SandboxSearchSortField,

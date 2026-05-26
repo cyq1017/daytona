@@ -33,6 +33,7 @@ from daytona_api_client.models.port_preview_url import PortPreviewUrl
 from daytona_api_client.models.region_quota import RegionQuota
 from daytona_api_client.models.resize_sandbox import ResizeSandbox
 from daytona_api_client.models.sandbox import Sandbox
+from daytona_api_client.models.sandbox_class import SandboxClass
 from daytona_api_client.models.sandbox_labels import SandboxLabels
 from daytona_api_client.models.sandbox_list_sort_direction import SandboxListSortDirection
 from daytona_api_client.models.sandbox_list_sort_field import SandboxListSortField

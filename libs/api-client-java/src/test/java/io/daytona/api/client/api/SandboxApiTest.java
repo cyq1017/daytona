@@ -29,6 +29,7 @@ import io.daytona.api.client.model.PortPreviewUrl;
 import io.daytona.api.client.model.RegionQuota;
 import io.daytona.api.client.model.ResizeSandbox;
 import io.daytona.api.client.model.Sandbox;
+import io.daytona.api.client.model.SandboxClass;
 import io.daytona.api.client.model.SandboxLabels;
 import io.daytona.api.client.model.SandboxListSortDirection;
 import io.daytona.api.client.model.SandboxListSortField;

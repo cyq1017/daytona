@@ -48,6 +48,8 @@ import type { ResizeSandbox } from '../models';
 // @ts-ignore
 import type { Sandbox } from '../models';
 // @ts-ignore
+import type { SandboxClass } from '../models';
+// @ts-ignore
 import type { SandboxLabels } from '../models';
 // @ts-ignore
 import type { SandboxListSortDirection } from '../models';
