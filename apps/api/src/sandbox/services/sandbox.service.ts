@@ -12,6 +12,8 @@ import {
   ConflictException,
   HttpException,
   HttpStatus,
+  BadRequestException,
+  InternalServerErrorException,
 } from '@nestjs/common'
 import { InjectRepository } from '@nestjs/typeorm'
 import { Not, Repository, LessThan, In, JsonContains, FindOptionsWhere, ILike } from 'typeorm'
@@ -26,9 +28,14 @@ import { SandboxClass } from '../enums/sandbox-class.enum'
 import { SandboxDesiredState } from '../enums/sandbox-desired-state.enum'
 import { RunnerClass } from '../enums/runner-class.enum'
 import { RunnerService } from './runner.service'
-import { SandboxError } from '../../exceptions/sandbox-error.exception'
+import { SandboxStateError } from '../../exceptions/sandbox-state-error.exception'
+import { SandboxBackupStateError } from '../../exceptions/sandbox-backup-state-error.exception'
+import { SandboxOperationNotSupportedError } from '../../exceptions/sandbox-operation-not-supported.exception'
 import { StateChangeInProgressError } from '../../exceptions/state-change-in-progress.exception'
-import { BadRequestError } from '../../exceptions/bad-request.exception'
+import { NoAvailableRunnersError } from '../../exceptions/no-available-runners.exception'
+import { OrganizationQuotaExceededError } from '../../exceptions/organization-quota-exceeded.exception'
+import { SandboxDiskExpansionLimitError } from '../../exceptions/sandbox-disk-expansion-limit.exception'
+import { RunnerErrorCode } from '@daytona/runner-api-client'
 import { Cron, CronExpression } from '@nestjs/schedule'
 import { BackupState } from '../enums/backup-state.enum'
 import { Snapshot } from '../entities/snapshot.entity'
@@ -86,7 +93,7 @@ import { SandboxRepository } from '../repositories/sandbox.repository'
 import { SnapshotRepository } from '../repositories/snapshot.repository'
 import { PortPreviewUrlDto, SignedPortPreviewUrlDto } from '../dto/port-preview-url.dto'
 import { RegionService } from '../../region/services/region.service'
-import { DefaultRegionRequiredException } from '../../organization/exceptions/DefaultRegionRequiredException'
+import { DefaultRegionRequiredError } from '../../exceptions/default-region-required.exception'
 import { SnapshotService } from './snapshot.service'
 import { DockerRegistryService } from '../../docker-registry/services/docker-registry.service'
 import { DockerRegistry } from '../../docker-registry/entities/docker-registry.entity'
@@ -159,7 +166,7 @@ export class SandboxService {
 
   private assertSandboxNotErrored(sandbox: Sandbox): void {
     if ([SandboxState.ERROR, SandboxState.BUILD_FAILED].includes(sandbox.state)) {
-      throw new SandboxError('Sandbox is in an errored state')
+      throw new SandboxStateError('Sandbox is in an errored state')
     }
   }
 
@@ -193,27 +200,27 @@ export class SandboxService {
       getEffectivePerSandboxLimits(organization, regionQuota, gpuEnabled)
 
     if (cpu > maxCpuPerSandbox) {
-      throw new BadRequestError(
+      throw new BadRequestException(
         `CPU request ${cpu} exceeds maximum allowed per sandbox (${maxCpuPerSandbox}).\n${PER_SANDBOX_LIMIT_MESSAGE}`,
       )
     }
     if (memory > maxMemoryPerSandbox) {
-      throw new BadRequestError(
+      throw new BadRequestException(
         `Memory request ${memory}GB exceeds maximum allowed per sandbox (${maxMemoryPerSandbox}GB).\n${PER_SANDBOX_LIMIT_MESSAGE}`,
       )
     }
     if (disk > maxDiskPerSandbox) {
-      throw new BadRequestError(
+      throw new BadRequestException(
         `Disk request ${disk}GB exceeds maximum allowed per sandbox (${maxDiskPerSandbox}GB).\n${PER_SANDBOX_LIMIT_MESSAGE}`,
       )
     }
 
     if (!ephemeral && maxDiskPerNonEphemeralSandbox !== null) {
       if (maxDiskPerNonEphemeralSandbox === 0) {
-        throw new BadRequestError('Only ephemeral sandboxes are permitted in this region')
+        throw new BadRequestException('Only ephemeral sandboxes are permitted in this region')
       }
       if (disk > maxDiskPerNonEphemeralSandbox) {
-        throw new BadRequestError(
+        throw new BadRequestException(
           `Disk request ${disk}GB exceeds maximum allowed per non-ephemeral sandbox (${maxDiskPerNonEphemeralSandbox}GB).\n${PER_SANDBOX_LIMIT_MESSAGE}`,
         )
       }
@@ -241,7 +248,7 @@ export class SandboxService {
 
     // Fail fast: requesting GPU in a region with no GPU quota at all.
     if (gpu > 0 && regionQuota.totalGpuQuota === 0) {
-      throw new BadRequestError(`Total GPU limit exceeded. Maximum allowed: ${regionQuota.totalGpuQuota}.`)
+      throw new BadRequestException(`Total GPU limit exceeded. Maximum allowed: ${regionQuota.totalGpuQuota}.`)
     }
 
     // validate usage quotas
@@ -270,25 +277,25 @@ export class SandboxService {
       const upgradeTierMessage = UPGRADE_TIER_MESSAGE(this.configService.getOrThrow('dashboardUrl'))
 
       if (usageOverview.currentCpuUsage + usageOverview.pendingCpuUsage > regionQuota.totalCpuQuota) {
-        throw new BadRequestError(
+        throw new OrganizationQuotaExceededError(
           `Total CPU limit exceeded. Maximum allowed: ${regionQuota.totalCpuQuota}.\n${upgradeTierMessage}`,
         )
       }
 
       if (usageOverview.currentMemoryUsage + usageOverview.pendingMemoryUsage > regionQuota.totalMemoryQuota) {
-        throw new BadRequestError(
+        throw new OrganizationQuotaExceededError(
           `Total memory limit exceeded. Maximum allowed: ${regionQuota.totalMemoryQuota}GiB.\n${upgradeTierMessage}`,
         )
       }
 
       if (usageOverview.currentDiskUsage + usageOverview.pendingDiskUsage > regionQuota.totalDiskQuota) {
-        throw new BadRequestError(
+        throw new OrganizationQuotaExceededError(
           `Total disk limit exceeded. Maximum allowed: ${regionQuota.totalDiskQuota}GiB.\n${ARCHIVE_SANDBOXES_MESSAGE}\n${upgradeTierMessage}`,
         )
       }
 
       if (usageOverview.currentGpuUsage + usageOverview.pendingGpuUsage > regionQuota.totalGpuQuota) {
-        throw new BadRequestError(
+        throw new OrganizationQuotaExceededError(
           `Total GPU limit exceeded. Maximum allowed: ${regionQuota.totalGpuQuota}.\n${upgradeTierMessage}`,
         )
       }
@@ -348,7 +355,7 @@ export class SandboxService {
     }
 
     if (sandbox.state !== SandboxState.STOPPED) {
-      throw new SandboxError('Sandbox is not stopped')
+      throw new SandboxStateError('Sandbox is not stopped')
     }
 
     if (sandbox.pending) {
@@ -356,7 +363,7 @@ export class SandboxService {
     }
 
     if (isEphemeral(sandbox)) {
-      throw new SandboxError('Ephemeral sandboxes cannot be archived')
+      throw new SandboxOperationNotSupportedError('Ephemeral sandboxes cannot be archived')
     }
 
     const updateData: Partial<Sandbox> = {
@@ -396,7 +403,7 @@ export class SandboxService {
       ],
     })
     if (!snapshot) {
-      throw new BadRequestError(`Snapshot ${sandbox.snapshot} not found while creating warm pool sandbox`)
+      throw new BadRequestException(`Snapshot ${sandbox.snapshot} not found while creating warm pool sandbox`)
     }
 
     const runner = await this.runnerService.getRandomAvailableRunner({
@@ -447,7 +454,7 @@ export class SandboxService {
       })
 
       if (snapshots.length === 0) {
-        throw new BadRequestError(
+        throw new BadRequestException(
           `Snapshot ${snapshotIdOrName} not found. Did you add it through the Daytona Dashboard?`,
         )
       }
@@ -459,15 +466,15 @@ export class SandboxService {
       }
 
       if (!(await this.snapshotService.isAvailableInRegion(snapshot.id, region.id))) {
-        throw new BadRequestError(`Snapshot ${snapshotIdOrName} is not available in region ${region.id}`)
+        throw new BadRequestException(`Snapshot ${snapshotIdOrName} is not available in region ${region.id}`)
       }
 
       if (snapshot.state !== SnapshotState.ACTIVE) {
-        throw new BadRequestError(`Snapshot ${snapshotIdOrName} is ${snapshot.state}`)
+        throw new BadRequestException(`Snapshot ${snapshotIdOrName} is ${snapshot.state}`)
       }
 
       if (!snapshot.ref) {
-        throw new BadRequestError('Snapshot ref is not defined')
+        throw new BadRequestException('Snapshot ref is not defined')
       }
 
       const cpu = snapshot.cpu
@@ -477,7 +484,7 @@ export class SandboxService {
 
       // GPU sandboxes are always ephemeral.
       if (gpu > 0 && !isEphemeral(createSandboxDto)) {
-        throw new BadRequestError('GPU sandboxes must be ephemeral - set autoDeleteInterval to 0')
+        throw new BadRequestException('GPU sandboxes must be ephemeral - set autoDeleteInterval to 0')
       }
 
       this.organizationService.assertOrganizationIsNotSuspended(organization)
@@ -639,7 +646,7 @@ export class SandboxService {
 
     if (warmPoolSandbox.gpu > 0) {
       if (createSandboxDto.autoDeleteInterval !== undefined && createSandboxDto.autoDeleteInterval !== 0) {
-        throw new BadRequestError('GPU sandboxes must be ephemeral - autoDeleteInterval must be 0')
+        throw new BadRequestException('GPU sandboxes must be ephemeral - autoDeleteInterval must be 0')
       }
       updateData.autoDeleteInterval = 0
     } else if (createSandboxDto.autoDeleteInterval !== undefined) {
@@ -655,7 +662,7 @@ export class SandboxService {
     }
 
     if (!warmPoolSandbox.runnerId) {
-      throw new SandboxError('Runner not found for warm pool sandbox')
+      throw new InternalServerErrorException('Runner not found for warm pool sandbox')
     }
 
     if (
@@ -712,7 +719,7 @@ export class SandboxService {
 
       // GPU sandboxes are always ephemeral - delete on first stop.
       if (gpu > 0 && !isEphemeral(createSandboxDto)) {
-        throw new BadRequestError('GPU sandboxes must be ephemeral - set autoDeleteInterval to 0')
+        throw new BadRequestException('GPU sandboxes must be ephemeral - set autoDeleteInterval to 0')
       }
 
       this.organizationService.assertOrganizationIsNotSuspended(organization)
@@ -815,11 +822,7 @@ export class SandboxService {
 
         sandbox.runnerId = runner.id
       } catch (error) {
-        if (
-          error instanceof BadRequestError == false ||
-          error.message !== 'No available runners' ||
-          !createSandboxDto.buildInfo
-        ) {
+        if (!(error instanceof NoAvailableRunnersError) || !createSandboxDto.buildInfo) {
           throw error
         }
         sandbox.state = SandboxState.PENDING_BUILD
@@ -874,11 +877,11 @@ export class SandboxService {
     const sandbox = await this.findOneByIdOrName(sandboxIdOrName, organizationId)
 
     if (isEphemeral(sandbox)) {
-      throw new SandboxError('Ephemeral sandboxes cannot be backed up')
+      throw new SandboxOperationNotSupportedError('Ephemeral sandboxes cannot be backed up')
     }
 
     if (![BackupState.COMPLETED, BackupState.NONE].includes(sandbox.backupState)) {
-      throw new SandboxError('Sandbox backup is already in progress')
+      throw new SandboxBackupStateError('Sandbox backup is already in progress')
     }
 
     this.eventEmitter.emit(SandboxEvents.BACKUP_CREATED, new SandboxBackupCreatedEvent(sandbox))
@@ -901,7 +904,7 @@ export class SandboxService {
 
     try {
       if (sourceSandbox.state !== SandboxState.STARTED) {
-        throw new BadRequestError('Sandbox must be in started state to fork')
+        throw new BadRequestException('Sandbox must be in started state to fork')
       }
 
       if (sourceSandbox.pending) {
@@ -1106,7 +1109,7 @@ export class SandboxService {
 
     try {
       if (![SandboxState.STARTED, SandboxState.STOPPED].includes(sandbox.state)) {
-        throw new BadRequestError('Sandbox must be in started or stopped state to create a snapshot')
+        throw new BadRequestException('Sandbox must be in started or stopped state to create a snapshot')
       }
 
       if (sandbox.pending) {
@@ -1133,7 +1136,7 @@ export class SandboxService {
       const registry = (await this.dockerRegistryService.getAvailableInternalRegistry(sandbox.region)) ?? undefined
 
       if (runner.runnerClass === RunnerClass.CONTAINER && !registry) {
-        throw new BadRequestError(
+        throw new BadRequestException(
           'No internal registry is available for this sandbox region; cannot snapshot a Docker sandbox',
         )
       }
@@ -1412,7 +1415,7 @@ export class SandboxService {
    * @param organizationId - The ID of the organization
    * @param query - The query parameters
    * @returns The paginated list of sandboxes. If cursor is omitted from the query, newest sandboxes will be returned.
-   * @throws BadRequestError if the cursor is invalid
+   * @throws BadRequestException if the cursor is invalid
    */
   async search(organizationId: string, query: ListSandboxesQueryDto): Promise<ListSandboxesResponseDto> {
     let parsedLabels: { [key: string]: string } | undefined
@@ -1420,7 +1423,7 @@ export class SandboxService {
       try {
         parsedLabels = JSON.parse(query.labels)
       } catch {
-        throw new BadRequestError('Invalid labels JSON format')
+        throw new BadRequestException('Invalid labels JSON format')
       }
     }
 
@@ -1502,7 +1505,7 @@ export class SandboxService {
       // Validate that all states have corresponding desired states
       states.forEach((state) => {
         if (!this.hasValidDesiredState(state)) {
-          throw new BadRequestError(`State ${state} does not have a corresponding desired state`)
+          throw new BadRequestException(`State ${state} does not have a corresponding desired state`)
         }
       })
       where.state = In(states)
@@ -1659,7 +1662,7 @@ export class SandboxService {
 
   async getPortPreviewUrl(sandboxIdOrName: string, organizationId: string, port: number): Promise<PortPreviewUrlDto> {
     if (port < 1 || port > 65535) {
-      throw new BadRequestError('Invalid port')
+      throw new BadRequestException('Invalid port')
     }
 
     const proxyDomain = this.configService.getOrThrow('proxy.domain')
@@ -1713,11 +1716,11 @@ export class SandboxService {
     expiresInSeconds = 60,
   ): Promise<SignedPortPreviewUrlDto> {
     if (port < 1 || port > 65535) {
-      throw new BadRequestError('Invalid port')
+      throw new BadRequestException('Invalid port')
     }
 
     if (expiresInSeconds < 1 || expiresInSeconds > 60 * 60 * 24) {
-      throw new BadRequestError('expiresInSeconds must be between 1 second and 24 hours')
+      throw new BadRequestException('expiresInSeconds must be between 1 second and 24 hours')
     }
 
     const proxyDomain = this.configService.getOrThrow('proxy.domain')
@@ -1807,7 +1810,7 @@ export class SandboxService {
     })
     const activeChildren = forkChildren.filter((f) => f.child && f.child.desiredState !== SandboxDesiredState.DESTROYED)
     if (activeChildren.length > 0) {
-      throw new BadRequestError(
+      throw new BadRequestException(
         'Cannot delete sandbox which has active fork children. The forks must be deleted first.',
       )
     }
@@ -1854,7 +1857,7 @@ export class SandboxService {
       }
 
       if (![SandboxState.STOPPED, SandboxState.ARCHIVED, SandboxState.ARCHIVING].includes(sandbox.state)) {
-        throw new SandboxError('Sandbox is not in valid state')
+        throw new SandboxStateError('Sandbox is not in valid state')
       }
 
       if (sandbox.pending) {
@@ -1925,7 +1928,7 @@ export class SandboxService {
     }
 
     if (sandbox.state !== SandboxState.STARTED) {
-      throw new SandboxError('Sandbox is not started')
+      throw new SandboxStateError('Sandbox is not started')
     }
 
     if (sandbox.pending) {
@@ -1963,7 +1966,7 @@ export class SandboxService {
     const sandbox = await this.findOneByIdOrName(sandboxIdOrName, organization.id)
 
     if (!sandbox.recoverable) {
-      throw new BadRequestError('Sandbox is not in a recoverable state')
+      throw new BadRequestException('Sandbox is not in a recoverable state')
     }
 
     const region = await this.regionService.findOne(sandbox.region)
@@ -1981,7 +1984,7 @@ export class SandboxService {
 
     try {
       if (sandbox.state !== SandboxState.ERROR) {
-        throw new BadRequestError('Sandbox must be in error state to recover')
+        throw new BadRequestException('Sandbox must be in error state to recover')
       }
 
       if (!sandbox.runnerId) {
@@ -2049,8 +2052,14 @@ export class SandboxService {
       try {
         await runnerAdapter.recoverSandbox(sandbox, backupRegistry, skipStart)
       } catch (error) {
-        if (error instanceof Error && error.message.includes('storage cannot be further expanded')) {
-          throw new ForbiddenException(
+        // New runners emit RunnerErrorCode.CodeStorageExpansionLimitReached when the
+        // 10% expansion cap is hit. The message-substring fallback keeps backward
+        // compatibility with older runners that surface the raw error without a structured code.
+        const isStorageExpansionLimit =
+          error?.response?.data?.code === RunnerErrorCode.CodeStorageExpansionLimitReached ||
+          (error instanceof Error && error.message.includes('storage cannot be further expanded'))
+        if (isStorageExpansionLimit) {
+          throw new SandboxDiskExpansionLimitError(
             `Sandbox storage cannot be further expanded. Maximum expansion of ${(sandbox.disk * 0.1).toFixed(2)}GB (10% of original ${sandbox.disk.toFixed(2)}GB) has been reached. Please contact support for further assistance.`,
           )
         }
@@ -2119,7 +2128,7 @@ export class SandboxService {
     try {
       // Validate sandbox is in a valid state for resize
       if (sandbox.state !== SandboxState.STARTED && sandbox.state !== SandboxState.STOPPED) {
-        throw new BadRequestError('Sandbox must be in started or stopped state to resize')
+        throw new BadRequestException('Sandbox must be in started or stopped state to resize')
       }
 
       if (sandbox.pending) {
@@ -2128,12 +2137,12 @@ export class SandboxService {
 
       // If no resize parameters provided, throw error
       if (resizeDto.cpu === undefined && resizeDto.memory === undefined && resizeDto.disk === undefined) {
-        throw new BadRequestError('No resource changes specified - sandbox is already at the desired configuration')
+        throw new BadRequestException('No resource changes specified - sandbox is already at the desired configuration')
       }
 
       // Disk resize requires stopped sandbox (cold resize only)
       if (resizeDto.disk !== undefined && sandbox.state !== SandboxState.STOPPED) {
-        throw new BadRequestError('Disk resize can only be performed on a stopped sandbox')
+        throw new BadRequestException('Disk resize can only be performed on a stopped sandbox')
       }
 
       // Hot resize (sandbox is running): only CPU and memory can be increased
@@ -2142,17 +2151,17 @@ export class SandboxService {
       // Validate hot resize constraints
       if (isHotResize) {
         if (resizeDto.cpu !== undefined && resizeDto.cpu < sandbox.cpu) {
-          throw new BadRequestError('Sandbox must be in stopped state to decrease the number of CPU cores')
+          throw new BadRequestException('Sandbox must be in stopped state to decrease the number of CPU cores')
         }
 
         if (resizeDto.memory !== undefined && resizeDto.memory < sandbox.mem) {
-          throw new BadRequestError('Sandbox must be in stopped state to decrease memory')
+          throw new BadRequestException('Sandbox must be in stopped state to decrease memory')
         }
       }
 
       // Disk can only be increased (never decreased)
       if (resizeDto.disk !== undefined && resizeDto.disk < sandbox.disk) {
-        throw new BadRequestError('Sandbox disk size cannot be decreased')
+        throw new BadRequestException('Sandbox disk size cannot be decreased')
       }
 
       // Calculate new resource values
@@ -2162,7 +2171,7 @@ export class SandboxService {
 
       // Throw if nothing actually changes
       if (newCpu === sandbox.cpu && newMem === sandbox.mem && newDisk === sandbox.disk) {
-        throw new BadRequestError('No resource changes specified - sandbox is already at the desired configuration')
+        throw new BadRequestException('No resource changes specified - sandbox is already at the desired configuration')
       }
 
       // Validate organization quotas for the new resource values
@@ -2176,27 +2185,27 @@ export class SandboxService {
         getEffectivePerSandboxLimits(organization, regionQuota, sandbox.gpu > 0)
 
       if (newCpu > maxCpuPerSandbox) {
-        throw new BadRequestError(
+        throw new BadRequestException(
           `CPU request ${newCpu} exceeds maximum allowed per sandbox (${maxCpuPerSandbox}).\n${PER_SANDBOX_LIMIT_MESSAGE}`,
         )
       }
       if (newMem > maxMemoryPerSandbox) {
-        throw new BadRequestError(
+        throw new BadRequestException(
           `Memory request ${newMem}GB exceeds maximum allowed per sandbox (${maxMemoryPerSandbox}GB).\n${PER_SANDBOX_LIMIT_MESSAGE}`,
         )
       }
       if (newDisk > maxDiskPerSandbox) {
-        throw new BadRequestError(
+        throw new BadRequestException(
           `Disk request ${newDisk}GB exceeds maximum allowed per sandbox (${maxDiskPerSandbox}GB).\n${PER_SANDBOX_LIMIT_MESSAGE}`,
         )
       }
 
       if (!isEphemeral(sandbox) && maxDiskPerNonEphemeralSandbox !== null) {
         if (maxDiskPerNonEphemeralSandbox === 0) {
-          throw new BadRequestError('Non-ephemeral sandboxes are not permitted in this region')
+          throw new BadRequestException('Non-ephemeral sandboxes are not permitted in this region')
         }
         if (newDisk > maxDiskPerNonEphemeralSandbox) {
-          throw new BadRequestError(
+          throw new BadRequestException(
             `Disk request ${newDisk}GB exceeds maximum allowed per non-ephemeral sandbox (${maxDiskPerNonEphemeralSandbox}GB).\n${PER_SANDBOX_LIMIT_MESSAGE}`,
           )
         }
@@ -2239,7 +2248,7 @@ export class SandboxService {
 
       // Get runner and validate before changing state
       if (!sandbox.runnerId) {
-        throw new BadRequestError('Sandbox has no runner assigned')
+        throw new BadRequestException('Sandbox has no runner assigned')
       }
 
       const runner = await this.runnerService.findOneOrFail(sandbox.runnerId)
@@ -2253,7 +2262,7 @@ export class SandboxService {
             : null
 
       if (!previousState) {
-        throw new BadRequestError('Sandbox must be in started or stopped state to resize')
+        throw new BadRequestException('Sandbox must be in started or stopped state to resize')
       }
 
       // Now transition to RESIZING state
@@ -2460,7 +2469,7 @@ export class SandboxService {
 
   private async getValidatedOrDefaultRegion(organization: Organization, regionIdOrName?: string): Promise<Region> {
     if (!organization.defaultRegionId) {
-      throw new DefaultRegionRequiredException()
+      throw new DefaultRegionRequiredError()
     }
 
     regionIdOrName = regionIdOrName?.trim()
@@ -2493,7 +2502,7 @@ export class SandboxService {
     if (Object.values(SandboxClass).includes(sandboxClass)) {
       return sandboxClass
     } else {
-      throw new BadRequestError('Invalid class')
+      throw new BadRequestException('Invalid class')
     }
   }
 
@@ -2717,7 +2726,7 @@ export class SandboxService {
     const sandbox = await this.findOneByIdOrName(sandboxIdOrName, organizationId)
 
     if (sandbox.gpu > 0) {
-      throw new BadRequestError('GPU sandboxes must remain ephemeral')
+      throw new BadRequestException('GPU sandboxes must remain ephemeral')
     }
 
     const updateData: Partial<Sandbox> = {
@@ -2805,7 +2814,7 @@ export class SandboxService {
 
     //  only allow updating the state of started | stopped sandboxes
     if (![SandboxState.STARTED, SandboxState.STOPPED].includes(sandbox.state)) {
-      throw new BadRequestError('Sandbox is not in a valid state to be updated')
+      throw new SandboxStateError('Sandbox is not in a valid state to be updated')
     }
 
     if (sandbox.desiredState == SandboxDesiredState.DESTROYED) {
@@ -2906,7 +2915,7 @@ export class SandboxService {
 
   private resolveAutoStopInterval(autoStopInterval: number): number {
     if (autoStopInterval < 0) {
-      throw new BadRequestError('Auto-stop interval must be non-negative')
+      throw new BadRequestException('Auto-stop interval must be non-negative')
     }
 
     return autoStopInterval
@@ -2914,7 +2923,7 @@ export class SandboxService {
 
   private resolveAutoArchiveInterval(autoArchiveInterval: number): number {
     if (autoArchiveInterval < 0) {
-      throw new BadRequestError('Auto-archive interval must be non-negative')
+      throw new BadRequestException('Auto-archive interval must be non-negative')
     }
 
     const maxAutoArchiveInterval = this.configService.getOrThrow('maxAutoArchiveInterval')
@@ -2930,7 +2939,7 @@ export class SandboxService {
     try {
       validateNetworkAllowList(networkAllowList)
     } catch (error) {
-      throw new BadRequestError(error instanceof Error ? error.message : 'Invalid network allow list')
+      throw new BadRequestException(error instanceof Error ? error.message : 'Invalid network allow list')
     }
 
     return networkAllowList
@@ -2940,13 +2949,13 @@ export class SandboxService {
     try {
       validateMountPaths(volumes)
     } catch (error) {
-      throw new BadRequestError(error instanceof Error ? error.message : 'Invalid volume mount configuration')
+      throw new BadRequestException(error instanceof Error ? error.message : 'Invalid volume mount configuration')
     }
 
     try {
       validateSubpaths(volumes)
     } catch (error) {
-      throw new BadRequestError(error instanceof Error ? error.message : 'Invalid volume subpath configuration')
+      throw new BadRequestException(error instanceof Error ? error.message : 'Invalid volume subpath configuration')
     }
 
     return volumes
