@@ -13,21 +13,15 @@ import {
   MintMountKeyResult,
 } from './layered-volume.provider'
 
-// Default per-region control-plane URLs used by the layered volume backend.
-//
-// Each region has its own control-plane host; disks live in exactly one
-// region and must be created against the matching host. The mapping below
-// can be overridden per-region with `LAYERED_CONTROL_URL_<REGION>` env vars
-// (with `-` replaced by `_`, e.g. `LAYERED_CONTROL_URL_AWS_US_EAST_1`) when a
-// future region or staging endpoint becomes available.
+// Placeholder per-region control-plane URLs. Real values must be supplied
+// via `LAYERED_CONTROL_URL_<REGION>` env vars (e.g. LAYERED_CONTROL_URL_AWS_US_EAST_1).
 const DEFAULT_CONTROL_URLS: Record<string, string> = {
-  'aws-us-east-1': 'https://control.green.us-east-1.aws.prod.archil.com',
-  'aws-eu-west-1': 'https://control.green.eu-west-1.aws.prod.archil.com',
-  'aws-us-west-2': 'https://control.green.us-west-2.aws.prod.archil.com',
-  'gcp-us-central1': 'https://control.blue.us-central1.gcp.prod.archil.com',
+  'aws-us-east-1': 'https://control.green.us-east-1.aws.prod.example.com',
+  'aws-eu-west-1': 'https://control.green.eu-west-1.aws.prod.example.com',
+  'aws-us-west-2': 'https://control.green.us-west-2.aws.prod.example.com',
+  'gcp-us-central1': 'https://control.blue.us-central1.gcp.prod.example.com',
 }
 
-// Re-export interface types for consumers that import from this file.
 export type {
   DiskMount as LayeredDiskMount,
   CreateDiskOptions as CreateLayeredDiskOptions,
@@ -59,6 +53,13 @@ interface AddDiskUserResponseData {
 
 export type { MintMountKeyResult, MintMountKeyOptions } from './layered-volume.provider'
 
+const MAX_ATTEMPTS = 4
+const PER_ATTEMPT_TIMEOUT_MS = 30_000
+const BACKOFF_BASE_MS = 500
+const BACKOFF_CAP_MS = 5_000
+const RETRY_AFTER_CAP_MS = 30_000
+const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([408, 429, 500, 502, 503, 504])
+
 @Injectable()
 export class LayeredVolumeClient implements LayeredVolumeProvider {
   private readonly logger = new Logger(LayeredVolumeClient.name)
@@ -70,9 +71,6 @@ export class LayeredVolumeClient implements LayeredVolumeProvider {
     this.defaultRegion = this.configService.get('layered.defaultRegion') || 'aws-us-east-1'
   }
 
-  // Whether the layered control-plane integration is configured. The
-  // layered volume backend requires this; volumes scheduled for that
-  // backend will fail with a clear error when it isn't.
   isConfigured(): boolean {
     return Boolean(this.apiKey)
   }
@@ -90,10 +88,7 @@ export class LayeredVolumeClient implements LayeredVolumeProvider {
       method: 'POST',
       body: JSON.stringify({
         name: opts.name,
-        // The control plane takes a list of mounts; we always provision
-        // exactly one S3 mount per disk so the disk is a 1:1 view of a
-        // Daytona-owned bucket (optionally scoped to a prefix). No
-        // vendor-managed storage path is supported.
+        // One S3 mount per disk: a 1:1 view of a Daytona-owned bucket.
         mounts: [opts.mount],
       }),
     })
@@ -102,9 +97,7 @@ export class LayeredVolumeClient implements LayeredVolumeProvider {
       throw new Error('createDisk response missing diskId')
     }
 
-    // Pull the auto-generated token user the API provisions on disk
-    // creation. We only ever provision token-based users for Daytona
-    // volumes; AWS STS users are out of scope here.
+    // Token users only; AWS STS users are out of scope.
     const tokenUser = res.authorizedUsers?.find((u) => u.type === 'token' && u.token)
     if (!tokenUser?.token) {
       throw new Error(
@@ -120,8 +113,7 @@ export class LayeredVolumeClient implements LayeredVolumeProvider {
     }
   }
 
-  // Deletes a layered disk and all its associated resources. Treats 404 as
-  // success so that retries after a partial delete are safe.
+  // 404 treated as success so retries after a partial delete are safe.
   async deleteDisk(diskId: string, region: string): Promise<void> {
     this.assertConfigured()
     const baseUrl = this.resolveControlUrl(region)
@@ -156,8 +148,7 @@ export class LayeredVolumeClient implements LayeredVolumeProvider {
     return { token: res.token, identifier: res.identifier }
   }
 
-  // Revokes a previously minted token from a disk. Treats 404 as success so
-  // double-revokes (e.g. after partial sandbox destroy) are safe.
+  // 404 treated as success so double-revokes after partial destroy are safe.
   async revokeMountKey(diskId: string, region: string, identifier: string): Promise<void> {
     this.assertConfigured()
     const baseUrl = this.resolveControlUrl(region)
@@ -186,44 +177,127 @@ export class LayeredVolumeClient implements LayeredVolumeProvider {
     const fallback = DEFAULT_CONTROL_URLS[region]
     if (!fallback) {
       throw new Error(
-        `Unknown layered region "${region}". Set ${overrideKey} to its control-plane URL or pick a documented region.`,
+        `Unknown layered region "${region}". Set ${overrideKey} to its control-plane URL or pick a known region key.`,
       )
     }
     return fallback
   }
 
+  // Retries POSTs too: createDisk / mintMountKey can leak a duplicate
+  // disk or token if the server processed the first attempt but we
+  // missed the response. Accepted tradeoff — orphans are cheap, failed
+  // user operations aren't. Each retry is logged at warn.
   private async request<T>(
     url: string,
     init: { method: 'GET' | 'POST' | 'DELETE'; body?: string; treat404AsOk?: boolean },
   ): Promise<T> {
-    const response = await fetch(url, {
-      method: init.method,
-      headers: {
-        Authorization: `key-${this.apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: init.body,
-    })
+    let lastError: Error | undefined
 
-    if (init.treat404AsOk && response.status === 404) {
-      return undefined as T
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const controller = new AbortController()
+      const timeoutHandle = setTimeout(() => controller.abort(), PER_ATTEMPT_TIMEOUT_MS)
+
+      let response: Response
+      try {
+        response = await fetch(url, {
+          method: init.method,
+          headers: {
+            Authorization: `key-${this.apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: init.body,
+          signal: controller.signal,
+        })
+      } catch (err) {
+        const message = controller.signal.aborted
+          ? `request timed out after ${PER_ATTEMPT_TIMEOUT_MS}ms`
+          : errorMessage(err)
+        lastError = new Error(message)
+
+        if (attempt < MAX_ATTEMPTS) {
+          const delayMs = backoffDelayMs(attempt)
+          this.logger.warn(
+            `Layered ${init.method} ${url} network error on attempt ${attempt}/${MAX_ATTEMPTS} (${message}); retrying in ${delayMs}ms`,
+          )
+          await sleep(delayMs)
+          continue
+        }
+        throw new Error(
+          `Layered control plane unreachable: ${init.method} ${url} failed after ${MAX_ATTEMPTS} attempts (${message})`,
+        )
+      } finally {
+        clearTimeout(timeoutHandle)
+      }
+
+      if (init.treat404AsOk && response.status === 404) {
+        return undefined as T
+      }
+
+      if (RETRYABLE_STATUSES.has(response.status) && attempt < MAX_ATTEMPTS) {
+        // Drain the body so the socket can be reused.
+        const raw = await response.text().catch(() => '')
+        const delayMs = retryAfterMs(response) ?? backoffDelayMs(attempt)
+        this.logger.warn(
+          `Layered ${init.method} ${url} returned ${response.status} on attempt ${attempt}/${MAX_ATTEMPTS}; retrying in ${delayMs}ms${
+            raw ? `: ${raw.slice(0, 200)}` : ''
+          }`,
+        )
+        lastError = new Error(`${response.status} ${response.statusText || 'transient error'}`)
+        await sleep(delayMs)
+        continue
+      }
+
+      let envelope: ApiResponseEnvelope<T>
+      const raw = await response.text()
+      try {
+        envelope = raw ? (JSON.parse(raw) as ApiResponseEnvelope<T>) : { success: response.ok }
+      } catch {
+        throw new Error(
+          `Layered ${init.method} ${url} returned non-JSON response (status ${response.status}): ${raw.slice(0, 200)}`,
+        )
+      }
+
+      if (!response.ok || envelope.success === false) {
+        const message = envelope.error || `${init.method} ${url} failed with status ${response.status}`
+        throw new Error(`Layered control plane error: ${message}`)
+      }
+
+      return envelope.data as T
     }
 
-    let envelope: ApiResponseEnvelope<T>
-    const raw = await response.text()
-    try {
-      envelope = raw ? (JSON.parse(raw) as ApiResponseEnvelope<T>) : { success: response.ok }
-    } catch {
-      throw new Error(
-        `Layered ${init.method} ${url} returned non-JSON response (status ${response.status}): ${raw.slice(0, 200)}`,
-      )
-    }
-
-    if (!response.ok || envelope.success === false) {
-      const message = envelope.error || `${init.method} ${url} failed with status ${response.status}`
-      throw new Error(`Layered control plane error: ${message}`)
-    }
-
-    return envelope.data as T
+    throw lastError ?? new Error(`Layered ${init.method} ${url} failed after ${MAX_ATTEMPTS} attempts`)
   }
+}
+
+// Exponential backoff with full jitter to avoid thundering-herd retries.
+function backoffDelayMs(attempt: number): number {
+  const upper = Math.min(BACKOFF_BASE_MS * 2 ** (attempt - 1), BACKOFF_CAP_MS)
+  return Math.floor(Math.random() * upper)
+}
+
+// Retry-After per RFC 9110 §10.2.3 (delta-seconds or HTTP-date), capped.
+function retryAfterMs(response: Response): number | undefined {
+  const header = response.headers.get('Retry-After')
+  if (!header) return undefined
+
+  const seconds = Number(header)
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(seconds * 1000, RETRY_AFTER_CAP_MS)
+  }
+
+  const dateMs = Date.parse(header)
+  if (!Number.isNaN(dateMs)) {
+    return Math.max(0, Math.min(dateMs - Date.now(), RETRY_AFTER_CAP_MS))
+  }
+
+  return undefined
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message
+  return String(err)
 }
