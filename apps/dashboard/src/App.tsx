@@ -203,24 +203,15 @@ function App() {
             <Route path={getRouteSubPath(RoutePath.EMAIL_VERIFY)} element={<EmailVerify />} />
           </>
         )}
-        <Route
-          path={getRouteSubPath(RoutePath.MEMBERS)}
-          element={
-            <NonPersonalOrganizationPageWrapper>
-              <OrganizationMembers />
-            </NonPersonalOrganizationPageWrapper>
-          }
-        />
+        <Route path={getRouteSubPath(RoutePath.MEMBERS)} element={<OrganizationMembers />} />
         {
           // TODO: uncomment when we allow creating custom roles
           /* <Route
           path={getRouteSubPath(RoutePath.ROLES)}
           element={
-            <NonPersonalOrganizationPageWrapper>
-              <OwnerAccessOrganizationPageWrapper>
-                <OrganizationRoles />
-              </OwnerAccessOrganizationPageWrapper>
-            </NonPersonalOrganizationPageWrapper>
+            <OwnerAccessOrganizationPageWrapper>
+              <OrganizationRoles />
+            </OwnerAccessOrganizationPageWrapper>
           }
         /> */
         }
@@ -282,16 +273,6 @@ function App() {
       <Route path="*" element={<NotFound />} />
     </Routes>
   )
-}
-
-function NonPersonalOrganizationPageWrapper({ children }: { children: React.ReactNode }) {
-  const { selectedOrganization } = useSelectedOrganization()
-
-  if (selectedOrganization?.personal) {
-    return <Navigate to={RoutePath.DASHBOARD} replace />
-  }
-
-  return children
 }
 
 function OwnerAccessOrganizationPageWrapper({ children }: { children: React.ReactNode }) {
