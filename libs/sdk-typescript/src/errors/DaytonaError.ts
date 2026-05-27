@@ -10,6 +10,8 @@
 import { AxiosHeaders } from 'axios'
 import type { AxiosError } from 'axios'
 
+import { ProxyErrorCode } from '../_generated/proxy-error-code'
+
 export type ResponseHeaders = InstanceType<typeof AxiosHeaders>
 
 /**
@@ -22,7 +24,7 @@ export type ResponseHeaders = InstanceType<typeof AxiosHeaders>
  * } catch (error) {
  *   if (error instanceof DaytonaError) {
  *     console.log(error.statusCode)
- *     console.log(error.errorCode)
+ *     console.log(error.code)
  *     console.log(error.message)
  *   }
  * }
@@ -32,16 +34,19 @@ export class DaytonaError extends Error {
   /** HTTP status code if available */
   public statusCode?: number
   /** Machine-readable error code if available */
-  public errorCode?: string
+  public code?: string
+  /** Error source if available */
+  public readonly source?: string
   /** Response headers if available */
   public headers?: ResponseHeaders
 
-  constructor(message: string, statusCode?: number, headers?: ResponseHeaders, errorCode?: string) {
+  constructor(message: string, statusCode?: number, headers?: ResponseHeaders, code?: string, source?: string) {
     super(message)
     this.name = new.target.name
     this.statusCode = statusCode
     this.headers = headers
-    this.errorCode = errorCode
+    this.code = code
+    this.source = source
   }
 }
 
@@ -72,7 +77,7 @@ export class DaytonaNotFoundError extends DaytonaError {}
  *   }
  * } catch (error) {
  *   if (error instanceof DaytonaRateLimitError) {
- *     console.log(error.errorCode)
+ *     console.log(error.code)
  *   }
  * }
  * ```
@@ -122,7 +127,7 @@ export class DaytonaAuthorizationError extends DaytonaError {}
  *   await daytona.create({ name: 'existing-sandbox' })
  * } catch (error) {
  *   if (error instanceof DaytonaConflictError) {
- *     console.log(error.errorCode)
+ *     console.log(error.code)
  *   }
  * }
  * ```
@@ -177,6 +182,48 @@ export class DaytonaTimeoutError extends DaytonaError {}
  */
 export class DaytonaConnectionError extends DaytonaError {}
 
+/**
+ * Map of (source, code) → DaytonaError subclass. The key is `source|code`,
+ * which keeps the mapping unique across services even when two components
+ * later use the same code string with different semantics.
+ *
+ * Entries with `*|code` (wildcard source) apply when the wire response omits
+ * `source` or carries an unrecognized one.
+ */
+const CODE_TO_ERROR_CLASS: Record<string, typeof DaytonaError> = {
+  'DAYTONA_DAEMON|GIT_AUTH_FAILED': DaytonaAuthenticationError,
+  'DAYTONA_DAEMON|GIT_REPO_NOT_FOUND': DaytonaNotFoundError,
+  'DAYTONA_DAEMON|GIT_BRANCH_NOT_FOUND': DaytonaNotFoundError,
+  'DAYTONA_DAEMON|GIT_PUSH_REJECTED': DaytonaConflictError,
+  'DAYTONA_DAEMON|GIT_BRANCH_EXISTS': DaytonaConflictError,
+  'DAYTONA_DAEMON|GIT_DIRTY_WORKTREE': DaytonaConflictError,
+  'DAYTONA_DAEMON|GIT_MERGE_CONFLICT': DaytonaConflictError,
+  'DAYTONA_DAEMON|FILE_NOT_FOUND': DaytonaNotFoundError,
+  'DAYTONA_DAEMON|FILE_ACCESS_DENIED': DaytonaAuthorizationError,
+  'DAYTONA_DAEMON|LSP_SERVER_NOT_INITIALIZED': DaytonaValidationError,
+  'DAYTONA_DAEMON|PROCESS_NOT_FOUND': DaytonaNotFoundError,
+  'DAYTONA_DAEMON|PROCESS_EXECUTION_TIMEOUT': DaytonaTimeoutError,
+  'DAYTONA_DAEMON|SESSION_ENDED': DaytonaNotFoundError,
+  'DAYTONA_DAEMON|COMMAND_ALREADY_COMPLETED': DaytonaNotFoundError,
+  'DAYTONA_DAEMON|A11Y_UNAVAILABLE': DaytonaConnectionError,
+  'DAYTONA_DAEMON|RECORDING_STILL_ACTIVE': DaytonaConflictError,
+  'DAYTONA_DAEMON|RECORDING_FFMPEG_NOT_FOUND': DaytonaConnectionError,
+  // Proxy-originated errors. The proxy translates upstream errors at the
+  // boundary, so these cover all preview-path failures the SDK sees.
+  [`DAYTONA_PROXY|${ProxyErrorCode.SANDBOX_NOT_FOUND}`]: DaytonaNotFoundError,
+  [`DAYTONA_PROXY|${ProxyErrorCode.SANDBOX_NOT_STARTED}`]: DaytonaValidationError,
+  [`DAYTONA_PROXY|${ProxyErrorCode.RUNNER_UNREACHABLE}`]: DaytonaConnectionError,
+}
+
+function lookupErrorClass(source: string | undefined, code: string | undefined): typeof DaytonaError | undefined {
+  if (!code) return undefined
+  if (source) {
+    const exact = CODE_TO_ERROR_CLASS[`${source}|${code}`]
+    if (exact) return exact
+  }
+  return CODE_TO_ERROR_CLASS[`*|${code}`]
+}
+
 const STATUS_CODE_TO_ERROR: Record<number, typeof DaytonaError> = {
   400: DaytonaValidationError,
   401: DaytonaAuthenticationError,
@@ -199,15 +246,20 @@ export function errorClassFromStatusCode(statusCode?: number): typeof DaytonaErr
 
 /**
  * Creates the appropriate Daytona error subclass from structured error metadata.
+ *
+ * Resolution order:
+ *   1. Precise (source, code) lookup.
+ *   2. HTTP status code fallback.
  */
 export function createDaytonaError(
   message: string,
   statusCode?: number,
   headers?: ResponseHeaders,
-  errorCode?: string,
+  code?: string,
+  source?: string,
 ): DaytonaError {
-  const ErrorClass = errorClassFromStatusCode(statusCode)
-  return new ErrorClass(message, statusCode, headers, errorCode)
+  const ErrorClass = lookupErrorClass(source, code) || errorClassFromStatusCode(statusCode)
+  return new ErrorClass(message, statusCode, headers, code, source)
 }
 
 function isAxiosTimeoutError(error: AxiosError): boolean {
@@ -227,15 +279,11 @@ function extractAxiosErrorCode(responseData?: Record<string, unknown>): string |
     return responseData.code
   }
 
-  if (typeof responseData?.error_code === 'string') {
-    return responseData.error_code
-  }
-
-  if (typeof responseData?.error === 'string') {
-    return responseData.error
-  }
-
   return undefined
+}
+
+function extractAxiosErrorSource(responseData?: Record<string, unknown>): string | undefined {
+  return typeof responseData?.source === 'string' ? responseData.source : undefined
 }
 
 function extractAxiosErrorMessage(error: AxiosError): string {
@@ -266,15 +314,16 @@ export function createAxiosDaytonaError(error: AxiosError): DaytonaError {
   const statusCode = error.response?.status
   const headers = error.response?.headers as ResponseHeaders | undefined
   const responseData = getAxiosResponseDataObject(error)
-  const errorCode = extractAxiosErrorCode(responseData)
+  const code = extractAxiosErrorCode(responseData)
+  const source = extractAxiosErrorSource(responseData)
 
   if (isAxiosTimeoutError(error)) {
-    return new DaytonaTimeoutError(message, statusCode, headers, errorCode)
+    return new DaytonaTimeoutError(message, statusCode, headers, code, source)
   }
 
   if (!error.response && (error.request || error.code)) {
-    return new DaytonaConnectionError(message, statusCode, headers, errorCode)
+    return new DaytonaConnectionError(message, statusCode, headers, code, source)
   }
 
-  return createDaytonaError(message, statusCode, headers, errorCode)
+  return createDaytonaError(message, statusCode, headers, code, source)
 }

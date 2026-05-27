@@ -31,4 +31,12 @@ public class DaytonaForbiddenException extends DaytonaException {
     public DaytonaForbiddenException(String message, Throwable cause) {
         super(403, message, cause);
     }
+
+    public DaytonaForbiddenException(String message, String code, String source) {
+        super(403, message, code, source);
+    }
+
+    public DaytonaForbiddenException(String message, Throwable cause, String code, String source) {
+        super(403, message, cause, code, source);
+    }
 }

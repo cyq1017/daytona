@@ -31,4 +31,12 @@ public class DaytonaBadRequestException extends DaytonaException {
     public DaytonaBadRequestException(String message, Throwable cause) {
         super(400, message, cause);
     }
+
+    public DaytonaBadRequestException(String message, String code, String source) {
+        super(400, message, code, source);
+    }
+
+    public DaytonaBadRequestException(String message, Throwable cause, String code, String source) {
+        super(400, message, cause, code, source);
+    }
 }

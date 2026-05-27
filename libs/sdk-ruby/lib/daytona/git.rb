@@ -314,17 +314,7 @@ module Daytona
     attr_reader :otel_state
 
     def map_api_error(api_error, prefix)
-      msg = "#{prefix}: #{api_error.message}"
-      case api_error.code
-      when 400 then Sdk::ValidationError.new(msg)
-      when 401 then Sdk::AuthenticationError.new(msg)
-      when 403 then Sdk::ForbiddenError.new(msg)
-      when 404 then Sdk::NotFoundError.new(msg)
-      when 409 then Sdk::ConflictError.new(msg)
-      when 429 then Sdk::RateLimitError.new(msg)
-      when 500..599 then Sdk::ServerError.new(msg)
-      else Sdk::Error.new(msg)
-      end
+      Sdk.wrap_error(api_error, prefix)
     end
   end
 end

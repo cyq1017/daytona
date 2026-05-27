@@ -34,4 +34,12 @@ public class DaytonaValidationException extends DaytonaException {
     public DaytonaValidationException(String message, Throwable cause) {
         super(422, message, cause);
     }
+
+    public DaytonaValidationException(String message, String code, String source) {
+        super(422, message, code, source);
+    }
+
+    public DaytonaValidationException(String message, Throwable cause, String code, String source) {
+        super(422, message, cause, code, source);
+    }
 }

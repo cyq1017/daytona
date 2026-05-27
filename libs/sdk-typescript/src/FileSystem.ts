@@ -78,12 +78,12 @@ export interface FileDownloadRequest {
  * @interface
  * @property {string} message - Human-readable error message.
  * @property {number | undefined} [statusCode] - HTTP-style status code for the per-file failure.
- * @property {string | undefined} [errorCode] - Machine-readable error code for the per-file failure.
+ * @property {string | undefined} [code] - Machine-readable error code for the per-file failure.
  */
 export interface FileDownloadErrorDetails {
   message: string
   statusCode?: number
-  errorCode?: string
+  code?: string
 }
 
 /**
@@ -178,7 +178,7 @@ function createFileDownloadError(error: string, errorDetails?: FileDownloadError
     return new DaytonaError(error)
   }
 
-  return createDaytonaError(errorDetails.message, errorDetails.statusCode, undefined, errorDetails.errorCode)
+  return createDaytonaError(errorDetails.message, errorDetails.statusCode, undefined, errorDetails.code)
 }
 
 /**

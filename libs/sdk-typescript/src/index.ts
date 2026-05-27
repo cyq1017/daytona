@@ -42,6 +42,7 @@ export {
   DaytonaTimeoutError,
   DaytonaValidationError,
 } from './errors/DaytonaError'
+export { ProxyErrorCode } from './_generated/proxy-error-code'
 export { Image } from './Image'
 export { Sandbox } from './Sandbox'
 export type { ListSandboxesQuery } from './Sandbox'

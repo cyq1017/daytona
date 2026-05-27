@@ -6,6 +6,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from typing_extensions import override
+
 
 class DaytonaError(Exception):
     """Base error for Daytona SDK.
@@ -16,14 +18,15 @@ class DaytonaError(Exception):
             sandbox = daytona.get("missing-sandbox")
         except DaytonaError as exc:
             print(exc.status_code)
-            print(exc.error_code)
+            print(exc.code)
             print(exc.message)
         ```
 
     Attributes:
         message (str): Error message
         status_code (int | None): HTTP status code if available
-        error_code (str | None): Machine-readable error code if available
+        code (str | None): Machine-readable error code if available
+        source (str | None): Error source if available
         headers (dict[str, Any]): Response headers
     """
 
@@ -32,7 +35,8 @@ class DaytonaError(Exception):
         message: str,
         status_code: int | None = None,
         headers: Mapping[str, Any] | None = None,
-        error_code: str | None = None,
+        code: str | None = None,
+        source: str | None = None,
     ):
         """Initialize Daytona error.
 
@@ -40,13 +44,28 @@ class DaytonaError(Exception):
             message (str): Error message
             status_code (int | None): HTTP status code if available
             headers (Mapping[str, Any] | None): Response headers if available
-            error_code (str | None): Machine-readable error code if available
+            code (str | None): Machine-readable error code if available
+            source (str | None): Error source if available
         """
         super().__init__(message)
         self.message: str = message
         self.status_code: int | None = status_code
-        self.error_code: str | None = error_code
+        self.code: str | None = code
+        self.source: str | None = source
         self.headers: dict[str, Any] = dict(headers or {})
+
+    @override
+    def __repr__(self) -> str:
+        parts = [
+            f"message={self.message!r}",
+            f"status_code={self.status_code!r}",
+            f"code={self.code!r}",
+        ]
+        if self.source is not None:
+            parts.append(f"source={self.source!r}")
+        if self.headers:
+            parts.append(f"headers={self.headers!r}")
+        return f"{self.__class__.__name__}({', '.join(parts)})"
 
 
 class DaytonaNotFoundError(DaytonaError):
@@ -98,7 +117,7 @@ class DaytonaRateLimitError(DaytonaError):
             for sandbox in daytona.list():
                 print(sandbox.id)
         except DaytonaRateLimitError as exc:
-            print(exc.error_code)
+            print(exc.code)
         ```
     """
 
@@ -112,7 +131,7 @@ class DaytonaConflictError(DaytonaError):
             params = CreateSandboxFromSnapshotParams(name="existing-sandbox")
             daytona.create(params)
         except DaytonaConflictError as exc:
-            print(exc.error_code)
+            print(exc.code)
         ```
     """
 
@@ -179,9 +198,16 @@ def create_daytona_error(
     message: str,
     status_code: int | None = None,
     headers: Mapping[str, Any] | None = None,
-    error_code: str | None = None,
+    code: str | None = None,
+    source: str | None = None,
 ) -> DaytonaError:
     """Create the appropriate DaytonaError subclass from structured error metadata."""
 
     error_cls = error_class_from_status_code(status_code)
-    return error_cls(message, status_code=status_code, headers=headers, error_code=error_code)
+    return error_cls(
+        message,
+        status_code=status_code,
+        headers=headers,
+        code=code,
+        source=source,
+    )

@@ -16,11 +16,13 @@ import {
 
 describe('Daytona errors', () => {
   it('constructs DaytonaError with properties', () => {
-    const err = new DaytonaError('boom', 500)
+    const err = new DaytonaError('boom', 500, undefined, 'INTERNAL', 'DAYTONA_RUNNER')
     expect(err).toBeInstanceOf(Error)
     expect(err.name).toBe('DaytonaError')
     expect(err.message).toBe('boom')
     expect(err.statusCode).toBe(500)
+    expect(err.code).toBe('INTERNAL')
+    expect(err.source).toBe('DAYTONA_RUNNER')
   })
 
   test.each([
@@ -51,7 +53,7 @@ describe('Daytona errors', () => {
     const err = createDaytonaError('missing', 404, undefined, 'FILE_NOT_FOUND')
 
     expect(err).toBeInstanceOf(DaytonaNotFoundError)
-    expect(err.errorCode).toBe('FILE_NOT_FOUND')
+    expect(err.code).toBe('FILE_NOT_FOUND')
     expect(err.message).toBe('missing')
   })
 })

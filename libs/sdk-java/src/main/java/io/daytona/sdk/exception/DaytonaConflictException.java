@@ -34,4 +34,12 @@ public class DaytonaConflictException extends DaytonaException {
     public DaytonaConflictException(String message, Throwable cause) {
         super(409, message, cause);
     }
+
+    public DaytonaConflictException(String message, String code, String source) {
+        super(409, message, code, source);
+    }
+
+    public DaytonaConflictException(String message, Throwable cause, String code, String source) {
+        super(409, message, cause, code, source);
+    }
 }

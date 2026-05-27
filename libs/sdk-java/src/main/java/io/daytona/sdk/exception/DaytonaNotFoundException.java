@@ -23,4 +23,12 @@ public class DaytonaNotFoundException extends DaytonaException {
     public DaytonaNotFoundException(String message, Throwable cause) {
         super(404, message, cause);
     }
+
+    public DaytonaNotFoundException(String message, String code, String source) {
+        super(404, message, code, source);
+    }
+
+    public DaytonaNotFoundException(String message, Throwable cause, String code, String source) {
+        super(404, message, cause, code, source);
+    }
 }

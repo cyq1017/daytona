@@ -48,14 +48,14 @@ describe('Daytona error mapping', () => {
 
     expect(daytonaError).toBeInstanceOf(DaytonaNotFoundError)
     expect(daytonaError.statusCode).toBe(404)
-    expect(daytonaError.errorCode).toBe('FILE_NOT_FOUND')
+    expect(daytonaError.code).toBe('FILE_NOT_FOUND')
     expect(daytonaError.headers).toBe(headers)
   })
 
-  it('extracts alternative structured error code fields', () => {
+  it('extracts code from structured error response', () => {
     const error = new AxiosError('Request failed', 'ERR_BAD_REQUEST', undefined, {} as never, {
       config: { headers: new AxiosHeaders() } as never,
-      data: { message: 'rate limited', error_code: 'RATE_LIMITED' },
+      data: { message: 'rate limited', code: 'RATE_LIMITED' },
       headers: new AxiosHeaders(),
       status: 429,
       statusText: 'Too Many Requests',
@@ -63,7 +63,7 @@ describe('Daytona error mapping', () => {
 
     const daytonaError = createAxiosDaytonaError(error)
 
-    expect(daytonaError.errorCode).toBe('RATE_LIMITED')
+    expect(daytonaError.code).toBe('RATE_LIMITED')
   })
 
   it('stringifies object payloads when mapping axios errors', () => {
@@ -81,6 +81,21 @@ describe('Daytona error mapping', () => {
     expect(daytonaError.message).toBe('{"nested":{"reason":"bad request"}}')
   })
 
+  it('does not use deprecated error field as fallback code', () => {
+    const error = new AxiosError('Request failed', 'ERR_BAD_REQUEST', undefined, {} as never, {
+      config: { headers: new AxiosHeaders() } as never,
+      data: { message: 'missing file', error: 'Not Found' },
+      headers: new AxiosHeaders(),
+      status: 404,
+      statusText: 'Not Found',
+    })
+
+    const daytonaError = createAxiosDaytonaError(error)
+
+    expect(daytonaError).toBeInstanceOf(DaytonaNotFoundError)
+    expect(daytonaError.code).toBeUndefined()
+  })
+
   it('creates generic DaytonaError for unknown non-network axios failures', () => {
     const error = new AxiosError('unknown failure')
 
@@ -95,6 +110,6 @@ describe('Daytona error mapping', () => {
 
     expect(error.message).toBe('conflict')
     expect(error.statusCode).toBe(409)
-    expect(error.errorCode).toBe('ALREADY_EXISTS')
+    expect(error.code).toBe('ALREADY_EXISTS')
   })
 })

@@ -112,7 +112,7 @@ class TestErrorFactories:
         assert error_class_from_status_code(None) is DaytonaError
 
     def test_create_daytona_error_uses_specific_subclass(self):
-        error = create_daytona_error("missing", status_code=404, error_code="NOT_FOUND")
+        error = create_daytona_error("missing", status_code=404, code="NOT_FOUND")
 
         assert isinstance(error, DaytonaNotFoundError)
-        assert error.error_code == "NOT_FOUND"
+        assert error.code == "NOT_FOUND"

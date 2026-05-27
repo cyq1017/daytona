@@ -23,4 +23,12 @@ public class DaytonaRateLimitException extends DaytonaException {
     public DaytonaRateLimitException(String message, Throwable cause) {
         super(429, message, cause);
     }
+
+    public DaytonaRateLimitException(String message, String code, String source) {
+        super(429, message, code, source);
+    }
+
+    public DaytonaRateLimitException(String message, Throwable cause, String code, String source) {
+        super(429, message, cause, code, source);
+    }
 }

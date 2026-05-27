@@ -31,4 +31,12 @@ public class DaytonaAuthenticationException extends DaytonaException {
     public DaytonaAuthenticationException(String message, Throwable cause) {
         super(401, message, cause);
     }
+
+    public DaytonaAuthenticationException(String message, String code, String source) {
+        super(401, message, code, source);
+    }
+
+    public DaytonaAuthenticationException(String message, Throwable cause, String code, String source) {
+        super(401, message, cause, code, source);
+    }
 }

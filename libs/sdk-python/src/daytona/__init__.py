@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from ._async.computer_use import AsyncComputerUse, AsyncDisplay, AsyncKeyboard, AsyncMouse, AsyncScreenshot
     from ._async.daytona import AsyncDaytona
     from ._async.sandbox import AsyncSandbox
+    from ._generated.proxy_error_code import ProxyErrorCode
     from ._sync.daytona import Daytona
     from ._sync.sandbox import Sandbox
     from .common.charts import (
@@ -123,6 +124,7 @@ __all__ = [
     "DaytonaConflictError",
     "DaytonaValidationError",
     "DaytonaConnectionError",
+    "ProxyErrorCode",
 ]
 
 # Mapping of symbol name -> (absolute module path, attribute name) for external packages
@@ -181,6 +183,8 @@ _DYNAMIC_IMPORTS: dict[str, str] = {
     "DaytonaConflictError": "common.errors",
     "DaytonaValidationError": "common.errors",
     "DaytonaConnectionError": "common.errors",
+    # _generated (proxy error codes parsed from apps/proxy/pkg/proxy/errors.go)
+    "ProxyErrorCode": "_generated.proxy_error_code",
     # common.filesystem
     "FileDownloadErrorDetails": "common.filesystem",
     "DownloadProgress": "common.filesystem",

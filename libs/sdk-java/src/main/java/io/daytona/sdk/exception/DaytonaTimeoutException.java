@@ -27,4 +27,12 @@ public class DaytonaTimeoutException extends DaytonaException {
     public DaytonaTimeoutException(String message) {
         super(message);
     }
+
+    public DaytonaTimeoutException(String message, String code, String source) {
+        super(0, message, code, source);
+    }
+
+    public DaytonaTimeoutException(String message, Throwable cause, String code, String source) {
+        super(0, message, cause, code, source);
+    }
 }

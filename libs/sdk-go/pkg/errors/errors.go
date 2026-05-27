@@ -17,6 +17,8 @@ type DaytonaError struct {
 	Message    string
 	StatusCode int
 	Headers    http.Header
+	Code       string
+	Source     string
 }
 
 func (e *DaytonaError) Error() string {
@@ -26,6 +28,8 @@ func (e *DaytonaError) Error() string {
 	return fmt.Sprintf("Daytona error: %s", e.Message)
 }
 
+func (e *DaytonaError) base() *DaytonaError { return e }
+
 // NewDaytonaError creates a new DaytonaError
 func NewDaytonaError(message string, statusCode int, headers http.Header) *DaytonaError {
 	return &DaytonaError{
@@ -33,6 +37,45 @@ func NewDaytonaError(message string, statusCode int, headers http.Header) *Dayto
 		StatusCode: statusCode,
 		Headers:    headers,
 	}
+}
+
+func parseErrorBody(body []byte) (message, code, source string, parsedStatusCode int) {
+	if len(body) == 0 {
+		return "", "", "", 0
+	}
+
+	var errResp struct {
+		Message    string `json:"message"`
+		Error      string `json:"error"`
+		StatusCode int    `json:"statusCode"`
+		Code       string `json:"code"`
+		Source     string `json:"source"`
+	}
+
+	if json.Unmarshal(body, &errResp) != nil {
+		return string(body), "", "", 0
+	}
+
+	if errResp.Message != "" {
+		message = errResp.Message
+	} else if errResp.Error != "" {
+		message = errResp.Error
+	}
+
+	return message, errResp.Code, errResp.Source, errResp.StatusCode
+}
+
+type daytonaErrorCarrier interface {
+	base() *DaytonaError
+}
+
+func applyErrorMetadata(err error, code, source string) error {
+	if carrier, ok := err.(daytonaErrorCarrier); ok {
+		b := carrier.base()
+		b.Code = code
+		b.Source = source
+	}
+	return err
 }
 
 // DaytonaNotFoundError represents a resource not found error (404)
@@ -160,27 +203,9 @@ func NewDaytonaTimeoutError(message string) *DaytonaTimeoutError {
 // NewDaytonaErrorFromBody parses a JSON response body and maps the status code
 // to the appropriate SDK error type. Falls back to the raw body as the message.
 func NewDaytonaErrorFromBody(body []byte, statusCode int, headers http.Header) error {
-	var message string
-
-	if len(body) > 0 {
-		var errResp struct {
-			Message    string `json:"message"`
-			Error      string `json:"error"`
-			StatusCode int    `json:"statusCode"`
-		}
-		if json.Unmarshal(body, &errResp) == nil {
-			if errResp.Message != "" {
-				message = errResp.Message
-			} else if errResp.Error != "" {
-				message = errResp.Error
-			}
-			if errResp.StatusCode != 0 {
-				statusCode = errResp.StatusCode
-			}
-		}
-		if message == "" {
-			message = string(body)
-		}
+	message, code, source, parsedStatusCode := parseErrorBody(body)
+	if parsedStatusCode != 0 {
+		statusCode = parsedStatusCode
 	}
 
 	if message == "" {
@@ -189,11 +214,11 @@ func NewDaytonaErrorFromBody(body []byte, statusCode int, headers http.Header) e
 
 	switch statusCode {
 	case http.StatusNotFound:
-		return NewDaytonaNotFoundError(message, headers)
+		return applyErrorMetadata(NewDaytonaNotFoundError(message, headers), code, source)
 	case http.StatusTooManyRequests:
-		return NewDaytonaRateLimitError(message, headers)
+		return applyErrorMetadata(NewDaytonaRateLimitError(message, headers), code, source)
 	default:
-		return NewDaytonaError(message, statusCode, headers)
+		return applyErrorMetadata(NewDaytonaError(message, statusCode, headers), code, source)
 	}
 }
 
@@ -216,23 +241,7 @@ func ConvertAPIError(err error, httpResp *http.Response) error {
 	if genErr, ok := err.(*apiclient.GenericOpenAPIError); ok {
 		body := genErr.Body()
 		if len(body) > 0 {
-			// Try to parse as JSON
-			var errResp struct {
-				Message string `json:"message"`
-				Error   string `json:"error"`
-			}
-			if json.Unmarshal(body, &errResp) == nil {
-				if errResp.Message != "" {
-					message = errResp.Message
-				} else if errResp.Error != "" {
-					message = errResp.Error
-				}
-			}
-
-			// Fall back to raw body if no structured message
-			if message == "" {
-				message = string(body)
-			}
+			message, _, _, _ = parseErrorBody(body)
 		}
 
 		// Fall back to error string if no body
@@ -243,7 +252,8 @@ func ConvertAPIError(err error, httpResp *http.Response) error {
 		message = err.Error()
 	}
 
-	return mapStatusCodeToError(statusCode, message, headers)
+	code, source := extractErrorMetadata(err)
+	return mapStatusCodeToError(statusCode, message, headers, code, source)
 }
 
 // ConvertToolboxError converts toolbox-api-client-go errors to SDK error types
@@ -265,23 +275,7 @@ func ConvertToolboxError(err error, httpResp *http.Response) error {
 	if genErr, ok := err.(*toolbox.GenericOpenAPIError); ok {
 		body := genErr.Body()
 		if len(body) > 0 {
-			// Try to parse as JSON
-			var errResp struct {
-				Message string `json:"message"`
-				Error   string `json:"error"`
-			}
-			if json.Unmarshal(body, &errResp) == nil {
-				if errResp.Message != "" {
-					message = errResp.Message
-				} else if errResp.Error != "" {
-					message = errResp.Error
-				}
-			}
-
-			// Fall back to raw body if no structured message
-			if message == "" {
-				message = string(body)
-			}
+			message, _, _, _ = parseErrorBody(body)
 		}
 
 		// Fall back to error string if no body
@@ -292,28 +286,40 @@ func ConvertToolboxError(err error, httpResp *http.Response) error {
 		message = err.Error()
 	}
 
-	return mapStatusCodeToError(statusCode, message, headers)
+	code, source := extractErrorMetadata(err)
+	return mapStatusCodeToError(statusCode, message, headers, code, source)
 }
 
-func mapStatusCodeToError(statusCode int, message string, headers http.Header) error {
+func extractErrorMetadata(err error) (code, source string) {
+	switch genErr := err.(type) {
+	case *apiclient.GenericOpenAPIError:
+		_, code, source, _ = parseErrorBody(genErr.Body())
+	case *toolbox.GenericOpenAPIError:
+		_, code, source, _ = parseErrorBody(genErr.Body())
+	}
+
+	return code, source
+}
+
+func mapStatusCodeToError(statusCode int, message string, headers http.Header, code, source string) error {
 	switch {
 	case statusCode == http.StatusBadRequest:
-		return NewDaytonaValidationError(message, headers)
+		return applyErrorMetadata(NewDaytonaValidationError(message, headers), code, source)
 	case statusCode == http.StatusUnauthorized:
-		return NewDaytonaAuthenticationError(message, headers)
+		return applyErrorMetadata(NewDaytonaAuthenticationError(message, headers), code, source)
 	case statusCode == http.StatusForbidden:
-		return NewDaytonaForbiddenError(message, headers)
+		return applyErrorMetadata(NewDaytonaForbiddenError(message, headers), code, source)
 	case statusCode == http.StatusNotFound:
-		return NewDaytonaNotFoundError(message, headers)
+		return applyErrorMetadata(NewDaytonaNotFoundError(message, headers), code, source)
 	case statusCode == http.StatusConflict:
-		return NewDaytonaConflictError(message, headers)
+		return applyErrorMetadata(NewDaytonaConflictError(message, headers), code, source)
 	case statusCode == http.StatusTooManyRequests:
-		return NewDaytonaRateLimitError(message, headers)
+		return applyErrorMetadata(NewDaytonaRateLimitError(message, headers), code, source)
 	case statusCode >= 500 && statusCode <= 599:
-		return NewDaytonaServerError(message, statusCode, headers)
+		return applyErrorMetadata(NewDaytonaServerError(message, statusCode, headers), code, source)
 	case statusCode == 0:
-		return NewDaytonaError(message, 0, nil)
+		return applyErrorMetadata(NewDaytonaError(message, 0, nil), code, source)
 	default:
-		return NewDaytonaError(message, statusCode, headers)
+		return applyErrorMetadata(NewDaytonaError(message, statusCode, headers), code, source)
 	}
 }
